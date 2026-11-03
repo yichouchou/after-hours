@@ -172,6 +172,29 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
   `Rules.evaluate()` **只在完成瞬间**调用；`reason == "in_progress"` 是**非终态**。
 - `Interaction.find_prop_in_range` **可以**拿 Node2D 参数、**可以**读 `global_position`
   （Pre-flight 裁定），但**不许**调 `get_tree()` / `get_node()`，且必须对**脱离场景树**的节点可用。
+- **★ 进度必须两个字段**（控制器裁定，Task 9 复审后明确）：
+  **① 已完成的捣蛋次数**（结算进度）**不清零**；
+  **② 当前那一条的「进行中」进度**作废（不是惩罚，那一条要重做）。
+  → **必须分属不同字段**，**不许用同一个 `progress` 字段**表达两件事。
+  → Task 9 的 `test_guard_flow.gd` 有一条「押送期间玩家脚本变量除 `escored`/`_bob` 外零变化」的断言
+  → 新增进度字段后**只**把「进行中进度」加进那条排除名单，**「已完成的捣蛋次数」必须留在受检集合内**。
+- **★ 拔路灯的「实际熄灯」归 Task 10**，且必须走 Task 9 已定的读取契约：
+  **meta `"lamp_on"` → 属性 `lamp_on` → 都没有就当亮着**。
+  **同一盏灯只能选一种注入方式**（`set_lamps()` 数组 **或** `lamp_root` 子节点）——
+  两种都上会被算两次 → `light_factor` 变成 0.36 而不是 0.6。
+  → `scripts/guard.gd` **不许改**（只能通过它定义的契约影响它）。
+- **★ `game_rpc.gd` 的追加禁改清单**（Task 9 复审实测得出）：
+  不许动 `player_caught` / `guard_state` / `escort_finished` 三个方法及其 `@rpc` 修饰符、
+  `HOST_PEER_ID` 常量、`send_escort_finished` 的**房主本地投递分支**
+  （实测 `call_remote` 本地**不执行** → 房主自己被抓时押送会卡死）、
+  三个信号名 `caught_player_evt` / `guard_state_evt` / `escort_completed_evt`。
+  → 新增方法的 `@rpc` 传输模式**要有断言钉住**（否则下一个人改错了没人知道）。
+- **★ `guard_wire_id` 的分配规则**：线上只有 int，客户端**没法**从 int 反查数据 id
+  → 编号必须**唯一**，且与 `data/guards.json` 的顺序**确定性绑定**，**不许依赖默认值 1**。
+- **★ peer id 解析不许再添第三套**：一律走 `Player.resolve_authority()`
+  （严格规则 `^[1-9][0-9]{0,9}$` 且 ∈ [1, 2^31-1]，否则兜底 1）。
+  `scripts/guard.gd` 现在用的是宽松的 `is_valid_int()`（`"007"`→7）→ 两套不一致，留给最终审查。
+
 
 **Task 11（镇子场景与 HUD）**
 
