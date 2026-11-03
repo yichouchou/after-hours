@@ -11,7 +11,12 @@ extends RefCounted
 ## player_visible 由场景层算好后传入（场景层用 in_sight_cone + effective_sight_range
 ## 判定）；本函数**不重算**可见性，否则会和 ctx 的判定打架。
 ## light_factor 的乘法只在 effective_sight_range 里做 —— 纯逻辑层不引入路灯实体，
-## 几盏灯灭由场景层决定。
+## 几盏灯灭由场景层决定（场景层用 compute_light_factor() 算）。
+##
+## Task 9 补的三块：
+##   * CARRY / RETURN 的状态迁移（begin_carry / finish_carry）
+##   * CHASE 的回落路径（跟丢 → 放弃追击）
+##   * compute_light_factor()：熄灭的路灯怎么衰减视野
 
 enum State { PATROL, SUSPICIOUS, CHASE, CARRY, RETURN }
 
@@ -20,6 +25,12 @@ const SUSPICION_DECAY := 1.0
 const SUSPICION_THRESHOLD := 0.5
 const CATCH_DISTANCE := 24.0
 const SIGHT_ANGLE_DEFAULT := 80.0
+
+## 每盏**熄灭**的路灯让视野乘的系数（-40%）。
+const DARK_LAMP_FACTOR := 0.6
+
+## 熄灭路灯的影响半径（5 格 = 160 px，1 格 = 32 px）。
+const DARK_LAMP_RADIUS := 160.0
 
 var state: int = State.PATROL
 var suspicion: float = 0.0
@@ -56,6 +67,43 @@ static func hearing_reached(dist: float, hearing_range: float) -> bool:
 	return hearing_range > 0.0 and dist <= hearing_range
 
 
+## 光照因子：守卫视野的衰减系数。
+##
+## 规则（Task 9 裁决）：每盏**熄灭**的路灯，若在守卫 radius（默认 5 格 = 160 px）内
+## → 因子 × 0.6；钳制到 [0, 1]。
+##   0 盏灭 → 1.0；1 盏灭 → 0.6；2 盏灭 → 0.36；3 盏灭 → 0.216。
+## **亮着的灯不影响**，范围外的熄灭灯也不影响。
+##
+## lamps 的每个元素是字典 {"position": Vector2, "on": bool}。
+## 纯函数：只吃数据，不碰场景树（路灯实体怎么找是场景层的事）。
+static func compute_light_factor(guard_pos: Vector2, lamps: Array,
+		radius: float = DARK_LAMP_RADIUS) -> float:
+	var factor := 1.0
+	for lamp in lamps:
+		if typeof(lamp) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = lamp
+		if bool(d.get("on", true)):
+			continue  # 亮着的灯不衰减视野
+		var pos: Vector2 = d.get("position", Vector2.ZERO)
+		if guard_pos.distance_to(pos) <= radius:
+			factor *= DARK_LAMP_FACTOR
+	return clampf(factor, 0.0, 1.0)
+
+
+## 抓捕开始：进入押送状态。
+##
+## **无参**（Task 9 裁决）：target_peer 在 CHASE 里已经设好，这里只切状态、保留目标。
+func begin_carry() -> void:
+	state = State.CARRY
+
+
+## 押送结束：回岗位。怀疑度清零（这一趟押送结束了）。
+func finish_carry() -> void:
+	state = State.RETURN
+	suspicion = 0.0
+
+
 ## 推进一帧状态机。返回 { state, target_peer, suspicion, catch_player }。
 ## 零失败惩罚：返回值里没有任何扣分 / 淘汰 / 扣命字段。
 func update(delta: float, ctx: Dictionary) -> Dictionary:
@@ -72,6 +120,21 @@ func update(delta: float, ctx: Dictionary) -> Dictionary:
 	var _sight_angle_deg: float = float(ctx.get("sight_angle_deg", SIGHT_ANGLE_DEFAULT))
 	var _light_factor: float = float(ctx.get("light_factor", 1.0))
 
+	# ------------------------------------------------------------------
+	# CARRY / RETURN 的早退分支
+	#
+	# 位置（Task 9 裁决）：必须插在**ctx 解析之后** ——
+	# visible / noise_active 是本函数内的**局部变量**，
+	# 插在函数开头会编译不过（Compile Error: Identifier "visible" not declared）。
+	# ------------------------------------------------------------------
+	if state == State.CARRY:
+		# 押送中：状态不由感知改写，等被抓方回报（escort_finished）。
+		return {"state": state, "target_peer": target_peer,
+			"suspicion": suspicion, "catch_player": false}
+	if state == State.RETURN and not visible and not noise_active:
+		# 回岗位途中四周安静 → 回到巡逻。
+		state = State.PATROL
+
 	var catch_player := false
 
 	if visible:
@@ -86,8 +149,13 @@ func update(delta: float, ctx: Dictionary) -> Dictionary:
 			state = State.SUSPICIOUS
 	else:
 		suspicion = maxf(0.0, suspicion - SUSPICION_DECAY * delta)
-		if suspicion <= 0.0 and state == State.SUSPICIOUS:
-			state = State.PATROL
+		if suspicion <= 0.0:
+			if state == State.SUSPICIOUS:
+				state = State.PATROL
+			elif state == State.CHASE:
+				# ★ 跟丢了：看不见目标 + 怀疑度衰减到 0 → 放弃追击。
+				# （Task 4 遗留的欠账：CHASE 原本没有回落路径，会永远卡在 CHASE。）
+				state = State.SUSPICIOUS
 
 	return {
 		"state": state,
