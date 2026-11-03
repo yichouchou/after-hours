@@ -13,7 +13,15 @@ extends SceneTree
 ##   * 客户端侧：把房主发出的消息按「发给谁」投递给客户端的接收入口
 ##     （_rpc_apply_roster / _rpc_apply_deal / _rpc_apply_round_ended，
 ##      与真实 RPC 的目标方法完全一致），断言**收到的数据被正确应用**。
-## → **本测试不覆盖真实 RPC 传输链**（跨进程），端到端由 Task 13 双窗口手动验收覆盖。
+##
+## ★ **_pump() 是测试替身**：它模拟的是「消息到达收方入口」这一步，
+##   **不覆盖真实 RPC 的序列化与传输**（跨进程）。
+##   真实链路（真正的 rpc_id 投递、跨进程序列化）由
+##   **tools/test_session_link.gd（双进程真实 RPC 测试）** 覆盖 —— 见那个文件。
+##
+## ★ **投递映射不许按名单顺序猜 peer id**（peer id 是随机的 32 位数）：
+##   本测试用**客户端自己的 transport peer id** 建立「peer id → Session」映射
+##   （_client_map()），那是真实连接关系，不是猜测。
 ##
 ## ------------------------------------------------------------------
 ## 【被改写的一条断言】（任务书第 66 行）
@@ -45,6 +53,7 @@ const HOST_PORT := 27030
 const THREE_HOST_PORT := 27031
 const BUSY_PORT := 27032
 const FAIL_PORT := 27033
+const LOBBY_PORT := 27034
 
 ## lobby_ui.gd 的 5 条 @onready 节点路径（必须与 scenes/lobby.tscn 完全一致）。
 const LOBBY_PATHS := [
@@ -55,10 +64,16 @@ const LOBBY_PATHS := [
 	"Center/Panel/Margin/VBox/StartButton",
 ]
 
-## 惩罚性 token（零失败惩罚）。只扫源码，不含 "fail"/"failed" ——
-## 传输层的 connection_failed 是正常词汇，不是惩罚。
-const PENALTY_TOKENS := ["penalty", "penalized", "score", "points", "score_delta",
+## 惩罚性 token（零失败惩罚）。只扫源码。
+## 注意**不含 "points"**：Mischief 的 points 是「这条行为值多少分」的数据字段
+## （data/mischief.json 里本来就有，且线格式必须原样带过去），不是「扣分」。
+## 「线格式里不许多出扣分字段」由更精确的断言把住（见 _check_wire_format）。
+const PENALTY_TOKENS := ["penalty", "penalized", "score", "score_delta",
 	"lives_lost", "eliminated", "hp", "damage", "扣分", "扣命", "淘汰", "死亡"]
+
+## 线格式固定字段清单（控制器已落笔进计划，下游不许各自发明）。
+const WIRE_FIELDS := ["id", "title", "category", "target_tag",
+	"needs_partner", "duration", "points"]
 
 var _fails := 0
 var _total := 0
@@ -164,16 +179,14 @@ func _boot() -> void:
 	_fails += _check(host_saw_client,
 		"房主侧握手成功，名单变成 2 人，实际 %s" % str(_s_host.peers()))
 
-	var client_peer_id := 0
-	for pid in _s_host.peers():
-		if pid != 1:
-			client_peer_id = pid
+	# 客户端自己的 peer id（**真实连接关系**，不是按名单顺序猜 —— peer id 是随机的）
+	var client_peer_id: int = int(_s_client._transport.get_peer_id())
 	_fails += _check(client_peer_id != 0, "房主名单里能找到客户端的 peer id")
 	_fails += _check(_s_host.peers().has(1), "房主名单含自己")
 	_fails += _check(_s_host.peers().has(client_peer_id), "房主名单含客户端")
 
 	# 房主把名单广播给客户端（headless 下用接收入口直调模拟"消息到达"）
-	var clients := {client_peer_id: _s_client}
+	var clients := _client_map([_s_client])
 	var cursor := _pump(_s_host, clients, 0)
 
 	_fails += _check(_s_client.peer_count() == 2, "客户端已入房，实际 %d" % _s_client.peer_count())
@@ -231,6 +244,65 @@ func _boot() -> void:
 		"客户端拿到的就是房主映射给它的那一份")
 	_fails += _check(_client_round_started_count >= 1,
 		"客户端收到清单时也触发 round_started，实际 %d 次" % _client_round_started_count)
+
+	# ---- C1：线格式必须是纯数据，客户端本地重建 Mischief ----
+	# 线上只能传纯数据：Object 会被引擎编码成对象 id，跨进程收到的是
+	# EncodedObjectAsID 占位符（字段全读不出来）。这里逐条把住。
+	var wire_hand: Array = _last_wire_hand(_s_host, client_peer_id)
+	_fails += _check(wire_hand.size() == 3,
+		"线格式里客户端那份是 3 张牌，实际 %d" % wire_hand.size())
+	var wire_fields_ok := true
+	for d in wire_hand:
+		if not (d is Dictionary):
+			wire_fields_ok = false
+			break
+		if _sorted_keys(d) != _sorted_list(WIRE_FIELDS):
+			wire_fields_ok = false
+			break
+	_fails += _check(wire_fields_ok,
+		"线格式每张牌都是恰好 7 个固定字段的纯数据字典（实际 %s）" % str(_wire_keys_of(wire_hand)))
+	var wire_types_ok := true
+	for d in wire_hand:
+		if not (d is Dictionary):
+			continue
+		if typeof(d.get("id", null)) != TYPE_STRING \
+				or typeof(d.get("title", null)) != TYPE_STRING \
+				or typeof(d.get("category", null)) != TYPE_STRING \
+				or typeof(d.get("target_tag", null)) != TYPE_STRING \
+				or typeof(d.get("needs_partner", null)) != TYPE_BOOL \
+				or typeof(d.get("duration", null)) != TYPE_FLOAT \
+				or typeof(d.get("points", null)) != TYPE_INT:
+			wire_types_ok = false
+			break
+	_fails += _check(wire_types_ok, "线格式字段类型正确（StringName 一律转成 String）")
+
+	# 客户端重建出来的对象：能读出全部字段，且与房主发出的逐字段一致
+	var rebuilt: Array = _s_client.deal()[0]
+	var card = rebuilt[0] if rebuilt.size() > 0 else null
+	_fails += _check(card is Mischief,
+		"客户端本地重建出的是 Mischief 对象（不是 EncodedObjectAsID 占位符），实际 %s"
+		% _card_type_name(card))
+	if card is Mischief:
+		var mm: Mischief = card
+		_fails += _check(String(mm.id) != "" and mm.title != "",
+			"重建的牌能读出 id 与 title（实际 id='%s' title='%s'）" % [String(mm.id), mm.title])
+		_fails += _check(String(mm.category) != "" and String(mm.target_tag) != "",
+			"重建的牌能读出 category 与 target_tag（实际 '%s' / '%s'）"
+			% [String(mm.category), String(mm.target_tag)])
+		_fails += _check(mm.duration > 0.0 and mm.points >= 0,
+			"重建的牌 duration/points 可读且 points 非负（零失败惩罚）")
+		var host_card = _find_card(client_hand, String(mm.id))
+		_fails += _check(host_card != null, "房主那份里有同一条行为 %s" % String(mm.id))
+		if host_card != null:
+			_fails += _check(host_card.title == mm.title
+					and host_card.category == mm.category
+					and host_card.target_tag == mm.target_tag
+					and host_card.needs_partner == mm.needs_partner
+					and is_equal_approx(host_card.duration, mm.duration)
+					and host_card.points == mm.points,
+				"重建后的 7 个字段与房主发出的逐字段一致")
+	_fails += _check(_s_client.deal()[0] is Array,
+		"客户端的 deal() 里是重建出来的对象数组")
 
 	# ④ 的第二种写法：客户端**已经拿到清单**之后再调一次 start_round()，
 	# 清单必须不变、且不产生新的回合。
@@ -306,18 +378,17 @@ func _boot() -> void:
 		"3 人局房主看到 3 人，实际 %d" % _s_host2.peer_count())
 	_fails += _check(_s_host2.peers().size() == 3, "3 人局房主名单有 3 个 peer")
 
-	var a_id := 0
-	var b_id := 0
-	for pid in _s_host2.peers():
-		if pid == 1:
-			continue
-		if a_id == 0:
-			a_id = pid
-		else:
-			b_id = pid
-	_fails += _check(a_id != 0 and b_id != 0, "3 人局房主能区分两个客户端的 peer id")
+	# peer id → Session 的对应关系**从真实连接关系推导**（每个客户端自己的
+	# transport peer id），**不按名单顺序猜** —— peer id 是随机的 32 位数，
+	# 先 join 的客户端未必排在名单前面（审查探针实测 3 轮里 2 轮不是）。
+	var a_id: int = int(_s_c2a._transport.get_peer_id())
+	var b_id: int = int(_s_c2b._transport.get_peer_id())
+	_fails += _check(a_id != 0 and b_id != 0 and a_id != b_id,
+		"3 人局两个客户端的 peer id 互不相同且都非 0")
+	_fails += _check(_s_host2.peers().has(a_id) and _s_host2.peers().has(b_id),
+		"3 人局房主名单含两个客户端各自的真实 peer id")
 
-	var clients2 := {a_id: _s_c2a, b_id: _s_c2b}
+	var clients2 := _client_map([_s_c2a, _s_c2b])
 	_pump(_s_host2, clients2, 0)
 	_fails += _check(_s_c2a.peer_count() == 3,
 		"3 人局客户端 A 看到 3 人，实际 %d" % _s_c2a.peer_count())
@@ -361,7 +432,9 @@ func _boot() -> void:
 
 	var s3 = _new_session()
 	s3.set_transport(ENetTransport.new())
-	# 预期失败：压掉引擎自身的 ERROR 日志，保持测试输出干净
+	# 预期失败：端口被占 → 引擎自己会打一条 ERROR（"Couldn't create an ENet host."）。
+	# 这里用 Engine.print_error_messages = false 压掉，保持测试输出干净；
+	# 真正的判据是下面那条「返回非 OK 的 Error」。
 	Engine.print_error_messages = false
 	var e3 := s3.host_game(BUSY_PORT)
 	Engine.print_error_messages = true
@@ -372,9 +445,21 @@ func _boot() -> void:
 	_fails += _check(s3.deal().is_empty(), "host 失败后清单仍为空")
 	_fails += _check(s3.peers().is_empty(),
 		"host 失败后名单仍为空，实际 %s" % str(s3.peers()))
+	# I3：失败后 Session **不再持有**那个失败过的 transport
+	_fails += _check(s3.get("_transport") == null,
+		"host 失败后 Session 丢弃了那个失败的 transport")
+	# 腾出端口后再点一次「创建房间」必须成功（证明状态是干净可重来的）
+	_close_peer(busy.get_peer())
+	var e3b := s3.host_game(BUSY_PORT)
+	_fails += _check(e3b == OK,
+		"host 失败后再点一次创建房间能成功（实际 %d）" % e3b)
+	_fails += _check(s3.is_host(), "重试之后 Session 又是房主")
+	_fails += _check(s3.peer_count() == 1, "重试之后房主自己算 1 人")
+	_fails += _check(s3.peers() == [1], "重试之后房主名单含自己")
 
 	var s4 = _new_session()
 	s4.set_transport(ENetTransport.new())
+	# 同上：非法地址 → create_client 失败，引擎会打一条 ERROR（预期内）。
 	Engine.print_error_messages = false
 	var e4 := s4.join_game("不是一个服务器地址", FAIL_PORT)
 	Engine.print_error_messages = true
@@ -383,9 +468,51 @@ func _boot() -> void:
 	_fails += _check(s4.peer_count() == 0,
 		"join 失败后 peer_count() 仍为 0，实际 %d" % s4.peer_count())
 	_fails += _check(s4.peers().is_empty(), "join 失败后名单仍为空")
+	_fails += _check(s4.get("_transport") == null,
+		"join 失败后 Session 丢弃了那个失败的 transport")
+	# 再点一次「加入房间」必须能成功（这次地址是对的）
+	var e4b := s4.join_game("127.0.0.1", HOST_PORT)
+	_fails += _check(e4b == OK,
+		"join 失败后再点一次加入房间能成功（实际 %d）" % e4b)
 
 	# ==================================================================
-	# 8. 纯净化 + 零失败惩罚
+	# 8. 大厅界面：对局场景缺失时**不许**开局（不许留半成品）
+	#    Task 8 之前 res://scenes/game.tscn 还不存在，Router 会安全跳过它；
+	#    如果这时候照样开回合，就会留下「回合开了但人还在大厅」的半成品。
+	# ==================================================================
+	_fails += _check(not ResourceLoader.exists("res://scenes/game.tscn"),
+		"前提：Task 8 之前 game.tscn 确实还不存在")
+	var lobby_packed: PackedScene = load("res://scenes/lobby.tscn")
+	if lobby_packed != null:
+		var lobby2 = lobby_packed.instantiate()
+		root.add_child(lobby2)
+		await process_frame
+		var s_lobby = _new_session()
+		s_lobby.set_transport(ENetTransport.new())
+		var e_lobby := s_lobby.host_game(LOBBY_PORT)
+		_fails += _check(e_lobby == OK, "大厅守卫用例：先建一个房（端口 %d）" % LOBBY_PORT)
+		# 让大厅界面用这个房间（默认它拿的是 autoload 的那个）
+		lobby2.set("_session", s_lobby)
+		var lobby_round_started := 0
+		s_lobby.round_started.connect(func(_deal): lobby_round_started += 1)
+		lobby2.call("_on_start")
+		await process_frame
+		_fails += _check(lobby_round_started == 0,
+			"对局场景不存在时点「开始」不会开回合（实际触发了 %d 次）" % lobby_round_started)
+		_fails += _check(s_lobby.deal().is_empty(),
+			"对局场景不存在时没有发牌（清单仍为空）")
+		var status_node = lobby2.get("_status")
+		var status_text := "" if status_node == null else str(status_node.text)
+		_fails += _check(status_text.contains("场景"),
+			"对局场景不存在时状态栏给出提示（实际 '%s'）" % status_text)
+		var p_lobby = s_lobby._transport.get_peer()
+		if p_lobby != null and p_lobby.get_connection_status() != MultiplayerPeer.CONNECTION_DISCONNECTED:
+			p_lobby.close()
+		lobby2.queue_free()
+		await process_frame
+
+	# ==================================================================
+	# 9. 纯净化 + 零失败惩罚
 	# ==================================================================
 	var net_files := ["res://scripts/net/session.gd", "res://scripts/net/transport.gd",
 		"res://scripts/net/enet_transport.gd"]
@@ -398,9 +525,12 @@ func _boot() -> void:
 	for token in PENALTY_TOKENS:
 		_fails += _check(not session_src.contains(token),
 			"Session 不出现惩罚性 token「%s」（零失败惩罚）" % token)
+	for token in PENALTY_TOKENS:
+		_fails += _check(not ui_src.contains(token),
+			"lobby_ui.gd 不出现惩罚性 token「%s」（零失败惩罚）" % token)
 
 	# ==================================================================
-	# 9. 收尾：释放会话与端口
+	# 10. 收尾：释放会话与端口
 	# ==================================================================
 	for s5 in _sessions:
 		s5.queue_free()
@@ -421,6 +551,11 @@ func _boot() -> void:
 	_fails += _check(e_free2 == OK, "收尾后端口 %d 已释放（实际 %d）" % [THREE_HOST_PORT, e_free2])
 	if probe2.get_peer() != null:
 		probe2.get_peer().close()
+	var probe3 := ENetTransport.new()
+	var e_free3 := probe3.host(LOBBY_PORT, 1)
+	_fails += _check(e_free3 == OK, "收尾后端口 %d 已释放（实际 %d）" % [LOBBY_PORT, e_free3])
+	if probe3.get_peer() != null:
+		probe3.get_peer().close()
 
 	print("")
 	print("断言总数：%d" % _total)
@@ -478,10 +613,83 @@ func _on_round_ended(s: SessionScript, summary: Dictionary) -> void:
 		_client_summary_keys = summary.keys()
 
 
+## 建立「peer id → Session」映射。
+##
+## **用客户端自己的 transport peer id** —— 那是**真实连接关系**
+## （房主看到的那个 id 就是客户端自己的 id）。
+## 绝不能按名单顺序猜：peer id 是随机的 32 位数，先 join 的客户端未必排在前面。
+func _client_map(clients: Array) -> Dictionary:
+	var out: Dictionary = {}
+	for c in clients:
+		var s: SessionScript = c
+		out[int(s._transport.get_peer_id())] = s
+	return out
+
+
+## 房主出站台账里，发给某个 peer 的**最后一条**清单消息的线格式载荷。
+func _last_wire_hand(host: SessionScript, peer_id: int) -> Array:
+	var box: Array = host.get("_outbox")
+	var found: Array = []
+	for msg in box:
+		var d: Dictionary = msg
+		if int(d["peer"]) != peer_id:
+			continue
+		if String(d["method"]) != "_rpc_apply_deal":
+			continue
+		found = d["args"][0]
+	return found
+
+
+## 线格式里每张牌的键集合（用来核对字段清单）。
+func _wire_keys_of(wire_hand: Array) -> Array:
+	var out: Array = []
+	for d in wire_hand:
+		if d is Dictionary:
+			out.append(_sorted_keys(d))
+	return out
+
+
+func _sorted_keys(d: Dictionary) -> Array:
+	return _sorted_list(d.keys())
+
+
+func _sorted_list(a: Array) -> Array:
+	var out: Array = []
+	for k in a:
+		out.append(String(k))
+	out.sort()
+	return out
+
+
+## 关掉一个 peer（避免二次 close 触发引擎 ERR_FAIL_COND）。
+func _close_peer(p: MultiplayerPeer) -> void:
+	if p == null:
+		return
+	if p.get_connection_status() == MultiplayerPeer.CONNECTION_DISCONNECTED:
+		return
+	p.close()
+
+
+## 在一份清单里按行为 id 找牌。
+func _find_card(hand: Array, id: String):
+	for m in hand:
+		if str(m.get("id")) == id:
+			return m
+	return null
+
+
+## 一张牌现在的类型名（用来证明不是 EncodedObjectAsID 占位符）。
+func _card_type_name(card) -> String:
+	if card == null:
+		return "(null)"
+	return "%d/%s" % [typeof(card), card.get_class()]
+
+
 ## 把房主「实际发出的」消息按发给谁投递给对应客户端的接收入口。
 ##
 ## headless 单进程里两个 peer 不能挂在同一个 MultiplayerAPI 上 → 真实 RPC 链跑不通。
-## 这里模拟的只是"消息到达"这一步，**收方入口与真实 RPC 的目标方法完全一致**。
+## 这里模拟的只是"消息到达"这一步，**收方入口与真实 RPC 的目标方法完全一致**；
+## 但**序列化与传输不在覆盖范围内**（那是 tools/test_session_link.gd 的活）。
 ## 返回新的游标（已投递到的出站台账下标）。
 func _pump(host: SessionScript, clients: Dictionary, from_index: int) -> int:
 	var box: Array = host.get("_outbox")

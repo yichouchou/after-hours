@@ -43,6 +43,48 @@ extends Node
 ##   发送时按 peer id 取对应那一份。
 ##
 ## ------------------------------------------------------------------
+## 【线格式：清单必须是纯数据】（修复轮 1 的 C1）
+## ------------------------------------------------------------------
+## **不能**把 Mischief 对象直接当 RPC 参数发 —— Godot 的 RPC 只序列化「纯数据」，
+## Object 会被编码成对象 id，跨进程收到的是 **EncodedObjectAsID 占位符**
+## （对象的所有字段都读不出来：id/title/category/target_tag 全是空值）。
+## 实测证据见 task-7-report.md 第 2 节。
+## → 线格式固定为**一张牌 = 一个基础类型字典**，字段清单固定（下游不许各自发明）：
+##     {"id": String, "title": String, "category": String, "target_tag": String,
+##      "needs_partner": bool, "duration": float, "points": int}
+##   （StringName 在线上**一律**转成 String）
+## → 客户端 `_apply_deal()` 收到后**本地重建 Mischief 对象**，
+##   所以 `deal()` 在**两端**都返回 Mischief 对象的数组（Task 10 / 11 不必知道线格式）。
+##
+## ------------------------------------------------------------------
+## 【广播时机：不能在原生 peer 回调里同步发 RPC】（修复轮 1 的 C2）
+## ------------------------------------------------------------------
+## 原生 peer 信号（peer_connected）**早于** MultiplayerAPI 的名单刷新，
+## 在这个回调里同步 `rpc_id()` 会被引擎拒收：
+##     ERROR: Attempt to call RPC with unknown peer ID: <id>
+## → 名单的重算与广播统一放到 `_process()` 里做（至少晚一帧），
+##   并且 `_send_to()` 会检查目标是否已在 MultiplayerAPI 的名单里，
+##   没在就**推迟到下一帧重发**（而不是丢掉）。
+##
+## ------------------------------------------------------------------
+## 【客户端「掉线」的真实原因：房主进程退出】（修复轮 1 实测）
+## ------------------------------------------------------------------
+## 双进程实测里客户端常常在连上后 ~9 秒掉线。**原因不是 ENet 的空闲超时**：
+## 原始 ENet 探针（.superpowers/.../_tmp_task7_review/probe_raw_link.gd）实测
+## 完全静默 13.7 秒也不掉线；真正让连接断掉的是**房主子进程先退出** ——
+## 房主进程一退出，它的 UDP 端口就消失，客户端下一次收发收到 ICMP 端口不可达
+## → 套接字被重置 → ENet 判定连接断开。
+## → 写双进程测试时**房主必须比客户端活得久**（见 tools/session_link_child.gd）。
+## → 也因此**不需要**「定期重播名单」来保活（那是对现象的错误归因）。
+##
+## ------------------------------------------------------------------
+## 【连接超时兜底只对客户端生效】（修复轮 1 的 C3）
+## ------------------------------------------------------------------
+## server_connected 是**客户端专用**信号（transport.gd 明确写了房主不发），
+## 所以房主建房成功即视为链路已建立，**不启动**连接超时计时器 ——
+## 否则房主会在 8 秒后把自己的房间拆掉。
+##
+## ------------------------------------------------------------------
 ## 【peer id 会变】
 ## ------------------------------------------------------------------
 ## Godot 4 的 ENet 客户端 peer id 是**随机 32 位数**（Task 6 实测 2131996968 等），
@@ -73,6 +115,9 @@ const CONNECT_TIMEOUT_SEC := 8.0
 ## 出站台账上限（防止无限增长）。
 const OUTBOX_LIMIT := 128
 
+## 推迟发送的最大重试次数（帧）。目标 peer 迟迟不进 MultiplayerAPI 名单时用。
+const PENDING_MAX_TRIES := 120
+
 var _transport: Transport = null
 
 ## 本机的清单。
@@ -93,6 +138,10 @@ var _deals_by_peer: Dictionary = {}
 ## 出站消息台账：{"peer": int, "method": StringName, "args": Array}
 ## 既用于自检（断言"发出的数据是对的"），也是排查联机问题的现场记录。
 var _outbox: Array = []
+
+## 推迟发送的出站消息：{"peer": int, "method": StringName, "args": Array, "tries": int}
+## 目标 peer 还没进 MultiplayerAPI 名单时先存这里，下一帧重发。
+var _pending: Array = []
 
 var _timeout_timer: Timer = null
 
@@ -121,25 +170,32 @@ func set_available_tags(tags: Array[StringName]) -> void:
 
 
 ## 开一个房间。失败（端口被占等）时返回非 OK 的 Error，状态保持自洽。
+##
+## **不启动连接超时计时器**：房主建房成功即视为链路已建立 ——
+## server_connected 是客户端专用信号，房主永远等不到它（否则 8 秒后房主会把自己的房间拆掉）。
 func host_game(port: int = DEFAULT_PORT) -> Error:
 	_ensure_transport()
 	var err := _transport.host(port, MAX_CLIENTS)
 	if err != OK:
+		# 失败就丢弃传输：Session 回到「什么都没开」的状态，
+		# 再点一次「创建房间」能干净地重来（I3）。
+		_drop_transport()
 		_reset_to_lobby()
 		return err
-	_start_connect_timeout()
-	# 刚开房时名单只有自己；有人进来时由 _on_transport_peer_connected 广播。
-	_refresh_roster(false)
+	# 刚开房时名单只有自己；有人进来时由 _process → _sync_roster 广播。
+	_refresh_roster()
 	return OK
 
 
 ## 加入一个房间。失败（地址非法等）时返回非 OK 的 Error，状态保持自洽。
 ##
 ## 客户端的名单**不从本地 peer_list() 算**，等房主广播。
+## **连接超时兜底只对客户端生效**：连不上时 8 秒后主动放弃并回到大厅态。
 func join_game(address: String, port: int = DEFAULT_PORT) -> Error:
 	_ensure_transport()
 	var err := _transport.join(address, port)
 	if err != OK:
+		_drop_transport()
 		_reset_to_lobby()
 		return err
 	_start_connect_timeout()
@@ -162,11 +218,29 @@ func _process(_delta: float) -> void:
 	# 已挂到 multiplayer 的 peer 由引擎每帧 poll，这里不重复驱动
 	if not _transport.is_attached():
 		_transport.poll()
+	# 推迟的出站消息重发（目标 peer 上一帧还没进 MultiplayerAPI 的名单）
+	_flush_pending()
+	# 房主：名单变了就重算 + 广播。
+	# **刻意放在这里而不是原生 peer 回调里** —— 原生 peer 信号早于 MultiplayerAPI
+	# 的名单刷新，在回调里同步 rpc_id() 会被引擎拒收（C2）。
+	if is_host():
+		_sync_roster()
 
 
 ## 本机是不是房主（房主权威：一切联机判定都在房主执行）。
+##
+## **peer 已经断开（失效）时不再问它 peer id**：ENetMultiplayerPeer.get_unique_id()
+## 在 peer 被关闭之后会打引擎 ERROR（"The multiplayer instance isn't currently
+## active."），每帧问一次会刷一屏错误（修复轮 1 双进程实测：掉线后 213 条）。
 func is_host() -> bool:
-	return _transport != null and _transport.is_host()
+	if _transport == null:
+		return false
+	var p := _transport.get_peer()
+	if p == null:
+		return false
+	if p.get_connection_status() == MultiplayerPeer.CONNECTION_DISCONNECTED:
+		return false
+	return _transport.is_host()
 
 
 ## 大厅里的人数（房主权威名单的长度）。
@@ -180,8 +254,9 @@ func peers() -> Array[int]:
 
 
 ## 本机的清单。房主 = 全部手牌；客户端 = 只有自己那一份。
+## 返回**副本**（与 peers() 的语义一致）：调用方改不动内部状态。
 func deal() -> Array:
-	return _deal
+	return _copy_deal(_deal)
 
 
 ## 房主侧查某个 peer 自己的那一份清单（peer id → 清单 映射表）。
@@ -215,13 +290,14 @@ func start_round() -> void:
 			hand = hands[i]
 		_deals_by_peer[int(roster[i])] = hand
 	_deal = hands
-	round_started.emit(_deal.duplicate())
-	# 定向发送：每人只拿自己那一份
+	round_started.emit(_copy_deal(_deal))
+	# 定向发送：每人只拿自己那一份（线上是**纯数据字典**，见文件头「线格式」）
 	for i in roster.size():
 		var pid := int(roster[i])
 		if pid == _own_peer_id():
 			continue
-		_send_to(pid, &"_rpc_apply_deal", [_deals_by_peer.get(pid, [])])
+		var hand: Array = _deals_by_peer.get(pid, [])
+		_send_to(pid, &"_rpc_apply_deal", [_hand_to_wire(hand)])
 
 
 ## 房主随时可以「收工」，**不惩罚任何人**（摘要原样透传，不追加任何额外字段）。
@@ -252,9 +328,12 @@ func _apply_roster(roster: Array) -> void:
 
 
 ## 【接收入口】收到「自己的那一份清单」→ 应用（客户端）。
+##
+## 线上的载荷是**纯数据字典**（见文件头「线格式」），这里**本地重建 Mischief 对象**，
+## 所以 deal() 在两端都返回 Mischief 数组。
 func _apply_deal(my_hand: Array) -> void:
-	_deal = [my_hand]
-	round_started.emit(_deal.duplicate())
+	_deal = [_hand_from_wire(my_hand)]
+	round_started.emit(_copy_deal(_deal))
 
 
 ## 【接收入口】收到收工通知 → 应用（客户端）。
@@ -263,14 +342,25 @@ func _apply_round_ended(summary: Dictionary) -> void:
 	round_ended.emit(summary.duplicate())
 
 
-## 房主侧重算名单（本地应用 + 广播）。
-func _refresh_roster(broadcast: bool) -> void:
+## 房主侧重算名单（本地应用）。
+func _refresh_roster() -> void:
+	if not is_host():
+		return
+	_apply_roster(_host_roster())
+
+
+## 房主：名单变了就重算 + 广播（**每帧**在 _process 里调）。
+##
+## **刻意不在原生 peer 回调里做**：原生 peer 信号早于 MultiplayerAPI 的名单刷新，
+## 在回调里同步 rpc_id() 会被引擎拒收（"Attempt to call RPC with unknown peer ID"，C2）。
+func _sync_roster() -> void:
 	if not is_host():
 		return
 	var roster := _host_roster()
+	if roster == _roster:
+		return
 	_apply_roster(roster)
-	if broadcast:
-		_broadcast_roster(roster)
+	_broadcast_roster(roster)
 
 
 ## 房主看到的全员名单：自己 + transport.peer_list()。
@@ -324,7 +414,38 @@ func _send_to(peer_id: int, method: StringName, args: Array) -> void:
 	_record_out(peer_id, method, args)
 	if not _can_rpc(peer_id):
 		return
+	if not _peer_in_api(peer_id):
+		# 目标还没进 MultiplayerAPI 的名单（原生 peer 信号比 API 名单早）→ 下一帧再发
+		_pending.append({"peer": peer_id, "method": method, "args": args, "tries": 0})
+		return
+	_do_rpc(peer_id, method, args)
+
+
+## 目标 peer 是否已经在 MultiplayerAPI 的名单里。
+func _peer_in_api(peer_id: int) -> bool:
 	var mp := multiplayer
+	if mp == null:
+		return false
+	return mp.get_peers().has(peer_id)
+
+
+## 重发上一帧没能发出去的消息（目标 peer 那时还没进 API 名单）。
+func _flush_pending() -> void:
+	if _pending.is_empty():
+		return
+	var still: Array = []
+	for item in _pending:
+		var pid := int(item["peer"])
+		if _peer_in_api(pid):
+			_do_rpc(pid, item["method"], item["args"])
+		elif int(item["tries"]) < PENDING_MAX_TRIES:
+			item["tries"] = int(item["tries"]) + 1
+			still.append(item)
+	_pending = still
+
+
+## 真正发出 RPC。
+func _do_rpc(peer_id: int, method: StringName, args: Array) -> void:
 	match method:
 		&"_rpc_apply_roster":
 			rpc_id(peer_id, "_rpc_apply_roster", args[0])
@@ -352,6 +473,9 @@ func _can_rpc(peer_id: int) -> bool:
 		return false
 	var peer := mp.multiplayer_peer
 	if peer == null:
+		return false
+	# peer 已经断开（失效）时不要再问它 peer id（会打引擎 ERROR，见 is_host 的说明）。
+	if peer.get_connection_status() == MultiplayerPeer.CONNECTION_DISCONNECTED:
 		return false
 	if _transport == null or _transport.get_peer() != peer:
 		return false
@@ -406,16 +530,14 @@ func _connect_transport_signals(t: Transport) -> void:
 
 
 func _on_transport_peer_connected(_id: int) -> void:
-	# 只有房主维护名单；客户端的 peer_connected(1) 只是"连上了服务器"。
-	if not is_host():
-		return
-	_refresh_roster(true)
+	# 什么都不做：名单的重算与广播统一由 _process → _sync_roster 负责
+	# （原生 peer 信号早于 MultiplayerAPI 的名单刷新，在回调里发 RPC 会被拒收 —— C2）。
+	pass
 
 
 func _on_transport_peer_disconnected(_id: int) -> void:
-	if not is_host():
-		return
-	_refresh_roster(true)
+	# 同上：交给 _process → _sync_roster。
+	pass
 
 
 func _on_transport_server_connected() -> void:
@@ -449,15 +571,22 @@ func _on_connect_timeout() -> void:
 	_reset_to_lobby()
 
 
-## 关闭并丢弃当前传输（超时兜底用）。
+## 关闭并丢弃当前传输（超时兜底 / 开房失败时用）。
 ## Transport 层把 peer 生命周期收在它自己那一层（Task 6 契约），本文件不改它；
-## 所以这里：先 close 底层 peer，再把 _transport 置空 ——
+## 所以这里：先让 mp 松手，再 close 底层 peer，最后把 _transport 置空 ——
 ## Session 侧状态立刻自洽（is_host() == false / peer_count() == 0 / 清单为空）。
 func _drop_transport() -> void:
 	if _transport != null:
 		var p := _transport.get_peer()
-		if p != null and p.get_connection_status() != MultiplayerPeer.CONNECTION_DISCONNECTED:
-			p.close()
+		if p != null:
+			# attached 模式：**必须先让 mp 松手**，再关 peer ——
+			# 否则 mp 还在 poll 一个已被关掉的 peer，引擎会打 ERROR。
+			if _transport.is_attached():
+				var mp := multiplayer
+				if mp != null and mp.multiplayer_peer == p:
+					mp.multiplayer_peer = null
+			if p.get_connection_status() != MultiplayerPeer.CONNECTION_DISCONNECTED:
+				p.close()
 	_transport = null
 
 
@@ -489,6 +618,63 @@ func _copy_tags(tags: Array[StringName]) -> Array[StringName]:
 	var out: Array[StringName] = []
 	for t in tags:
 		out.append(t)
+	return out
+
+
+## ------------------------------------------------------------------
+## 线格式（纯数据 ⇄ Mischief 对象）
+## ------------------------------------------------------------------
+
+## 一份清单（Mischief 数组）→ 线格式（**纯数据字典**数组）。
+func _hand_to_wire(hand: Array) -> Array:
+	var out: Array = []
+	for m in hand:
+		out.append(_mischief_to_wire(m))
+	return out
+
+
+## 线格式 → 一份清单（**本地重建** Mischief 对象）。
+func _hand_from_wire(wire_hand: Array) -> Array:
+	var out: Array = []
+	for d in wire_hand:
+		if d is Dictionary:
+			out.append(_mischief_from_wire(d))
+		elif d is Mischief:
+			out.append(d)
+	return out
+
+
+## 一张牌 → 线格式字典（7 个固定字段；StringName 一律转 String）。
+func _mischief_to_wire(m: Mischief) -> Dictionary:
+	return {
+		"id": String(m.id),
+		"title": String(m.title),
+		"category": String(m.category),
+		"target_tag": String(m.target_tag),
+		"needs_partner": bool(m.needs_partner),
+		"duration": float(m.duration),
+		"points": int(m.points),
+	}
+
+
+## 线格式字典 → 本地重建的 Mischief 对象。
+func _mischief_from_wire(d: Dictionary) -> Mischief:
+	var m := Mischief.new()
+	m.id = StringName(str(d.get("id", "")))
+	m.title = str(d.get("title", ""))
+	m.category = StringName(str(d.get("category", "")))
+	m.target_tag = StringName(str(d.get("target_tag", "")))
+	m.needs_partner = bool(d.get("needs_partner", false))
+	m.duration = float(d.get("duration", 0.0))
+	m.points = int(d.get("points", 0))
+	return m
+
+
+## 清单的深一层拷贝（外层 + 每份手牌）。
+func _copy_deal(deal: Array) -> Array:
+	var out: Array = []
+	for hand in deal:
+		out.append((hand as Array).duplicate())
 	return out
 
 

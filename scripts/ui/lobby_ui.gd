@@ -59,6 +59,12 @@ func _on_start() -> void:
 	# 只有房主能开局（一切联机判定都在房主执行）。
 	if _session == null or not _session.is_host():
 		return
+	# 对局场景还没建好时**不开回合**：Router 会安全跳过缺失的场景，
+	# 于是就留下「回合开了但人还在大厅」的半成品 —— 牌已经发出去，
+	# 人却卡在大厅里（Task 8 建好 game.tscn 之前不能这样）。
+	if not ResourceLoader.exists(GAME_SCENE):
+		_status.text = "对局场景还没建好（%s 缺失），暂时开不了局" % GAME_SCENE
+		return
 	_session.start_round()
 	var router := get_node_or_null("/root/Router")
 	if router != null:
