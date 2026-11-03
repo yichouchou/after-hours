@@ -40,6 +40,21 @@ const ESCORT_TOLERANCE := 8.0
 var _fails := 0
 var _total := 0
 
+## 允许写入位置的**自有子节点**引用。
+##
+## 只有**自己**的 sprite 例外（走路动画的视觉偏移 —— 那不是别人的位置）。
+const OWN_SPRITE := "sprite"
+
+
+## 玩家替身：**不会自己移动**的最小节点。
+##
+## 为什么不用真的 Player：Player 自带移动逻辑（输入 / 被押送时自己走回出生点），
+## 「玩家自己走」和「守卫拖走」就分不开了 → 测不出「房主有没有写玩家的位置」。
+## 这里只多暴露一个 spawn_position 字段，让「把玩家拉回出生点」那种违规写法
+## 在替身身上也能**真跑出来**（而不是报个引擎错误蒙混过关）。
+class StationaryStandIn extends Node2D:
+	var spawn_position: Vector2 = Vector2.ZERO
+
 
 func _initialize() -> void:
 	call_deferred("_boot")
@@ -388,6 +403,100 @@ func _boot() -> void:
 			"[§3-9] 玩家侧持有自己的出生点（spawn_position）")
 
 	# ==================================================================
+	# [§3-9b] 行为断言：房主**不许**写远端玩家的位置（位置是拥有者权威）
+	#
+	# 为什么要有这一段：以前这条 Critical 级规则只有一条**文本代理**
+	# （查 guard.gd 里有没有 "spawn_position" 这个词）。房主真写
+	# `pl.global_position` 时，那个词根本不出现 → 词扫描查不出来
+	# （复审变异 M7a 实测：整套断言仍然全绿）。
+	#
+	# 这里改成**行为**证明：
+	#   * 替身 = **不会自己移动**的最小 Node2D（不是 Player —— Player 自带
+	#     移动逻辑，「玩家自己走」和「守卫拖走」就分不开）；
+	#   * 替身挂在守卫注入的 player_root 下、节点名 = peer id（"1"），
+	#     所以守卫**真的**能看见它、锁定它、走到它面前；
+	#   * 让**引擎逐帧**驱动守卫的 _physics_process，跑完整段流程：
+	#     看见 → CHASE 追击 → 抓人 → CARRY → 跟随；
+	#   * **每一帧**都核对替身的位置 → 断言它**一帧都没被改动**。
+	#
+	# 机制：守卫只会**读**玩家位置（_player_position），然后自己走过去；
+	#       房主一旦写替身的位置（M7a 拉过去 / M7b 瞬移），替身就动了
+	#       → 断言立刻 FAIL。
+	# ==================================================================
+	var beh_root := Node2D.new()
+	beh_root.name = "PlayersBehavior"
+	root.add_child(beh_root)
+	# 替身的**基准位置是常量**，不是「稍后再读一次节点的位置」——
+	# 否则守卫有机会在观察窗口开始前就改写它，而断言却拿「改写后的值」
+	# 当基准（反向自检 M7a 实测踩过这个坑：核心断言会假绿）。
+	var beh_expected := Vector2(60, 0)
+	var beh_sub := StationaryStandIn.new()
+	beh_sub.name = "1"        # 玩家容器按 peer id 命名（守卫靠名字取人）
+	beh_sub.position = beh_expected
+	beh_sub.spawn_position = Vector2(64, 288)
+	beh_root.add_child(beh_sub)
+
+	var beh_caught: Array = []
+	var beh_guard = null
+	if guard_packed != null:
+		beh_guard = guard_packed.instantiate()
+		beh_guard.position = Vector2.ZERO
+		root.add_child(beh_guard)
+		beh_guard.set_player_root(beh_root)
+		# 让**引擎**驱动 _physics_process（真实逐帧，不手动调）——
+		# 这样走的确实是生产代码的那条路径。
+		beh_guard.set_physics_process(true)
+		beh_guard.caught_player.connect(func(peer_id: int) -> void:
+			beh_caught.append(peer_id))
+
+	if beh_guard != null:
+		# 前提检查放在**第一次 await 之前**：守卫还没跑过一帧，
+		# 这里量到的就是「场景刚搭好」的状态。
+		var beh_ctx: Dictionary = beh_guard._sense_context()
+		_fails += _check(bool(beh_ctx["player_visible"]),
+			"[§3-9b] 前提：替身在守卫的视野内（守卫真的看得见它）")
+		_fails += _check(int(beh_ctx["target_peer"]) == 1,
+			"[§3-9b] 前提：守卫按 peer id 锁定了替身（target_peer == 1）")
+		_fails += _check(beh_sub.global_position == beh_expected,
+			"[§3-9b] 前提：替身还在基准位置 %s（守卫没在我开跑前就动过它）"
+			% str(beh_expected))
+
+		var beh_moved_at := -1
+		var beh_moved_to := Vector2.ZERO
+		var beh_carry_frames := 0
+		var beh_saw_carry := false
+		var beh_min_gap := 1.0e9
+		for i in 100:
+			await physics_frame
+			var beh_now := beh_sub.global_position
+			if beh_now != beh_expected and beh_moved_at < 0:
+				beh_moved_at = i
+				beh_moved_to = beh_now
+			if beh_guard.brain.state == GuardBrain.State.CARRY:
+				beh_carry_frames += 1
+				beh_saw_carry = true
+			beh_min_gap = minf(beh_min_gap,
+				beh_guard.global_position.distance_to(beh_sub.global_position))
+
+		_fails += _check(beh_caught.size() >= 1 and int(beh_caught[0]) == 1,
+			"[§3-9b] 守卫发出了 caught_player(1)（真的走进了「抓人」分支）")
+		_fails += _check(beh_saw_carry,
+			"[§3-9b] 抓到人 → brain.begin_carry() → 进入 CARRY")
+		_fails += _check(beh_carry_frames >= 10,
+			"[§3-9b] CARRY/跟随阶段持续了 %d 帧（跟随路径被走到，不是只走了一帧）"
+			% beh_carry_frames)
+		_fails += _check(beh_min_gap <= GuardBrain.CATCH_DISTANCE,
+			"[§3-9b] 守卫**自己走过去**了（离替身最近 %.2f px ≤ 抓人距离 %.1f px）"
+			% [beh_min_gap, GuardBrain.CATCH_DISTANCE])
+		_fails += _check(beh_moved_at < 0,
+			"[§3-9b] **替身的位置一帧都没被守卫改动**（房主不写远端玩家的位置）"
+			+ ("" if beh_moved_at < 0
+				else "　第 %d 帧被改成 %s" % [beh_moved_at, str(beh_moved_to)]))
+		_fails += _check(beh_sub.global_position == beh_expected,
+			"[§3-9b] 押送全程结束后替身仍在基准位置 %s（实际 %s）"
+			% [str(beh_expected), str(beh_sub.global_position)])
+
+	# ==================================================================
 	# [§3-10] scripts/guard.gd 源码净化
 	# ==================================================================
 	var guard_src := _read_source(GUARD_SRC)
@@ -417,6 +526,44 @@ func _boot() -> void:
 		"[§3-12] guard_brain.gd 不出现 get_node(")
 
 	# ==================================================================
+	# [§3-13] 结构性扫描：**位置写入**（不是查某个词）
+	#
+	# 规则：
+	#   * scripts/guard.gd 里**任何**对**别的对象**的位置写入都不允许 ——
+	#     房主不许写远端玩家的 position / global_position（位置是拥有者权威）。
+	#     只有**自身**的 `global_position = …`（不带接收者）可以。
+	#   * scripts/player.gd 同理：它也不该写**别的玩家**的位置；
+	#     唯一例外是**自己**的 sprite（走路动画的视觉偏移）。
+	#
+	# 为什么不能只查某个词：房主真写 `pl.global_position` 时，源码里根本不出现
+	# "spawn_position" → 词扫描查不出来（复审变异 M7a 实测：80 条断言全绿）。
+	# 这里查的是**赋值形态**：谁的位置被写了。
+	# ==================================================================
+	var guard_writes := _position_writes(_read_source(GUARD_SRC), [OWN_SPRITE])
+	var guard_foreign := _foreign_writes(guard_writes)
+	_fails += _check(guard_foreign.is_empty(),
+		"[§3-13] 结构性扫描：guard.gd 里没有对**别的对象**的位置写入"
+		+ _writes_msg(guard_writes, guard_foreign))
+	var player_writes := _position_writes(_read_source(PLAYER_SRC), [OWN_SPRITE])
+	var player_foreign := _foreign_writes(player_writes)
+	_fails += _check(player_foreign.is_empty(),
+		"[§3-13] 结构性扫描：player.gd 里没有对**别的玩家**的位置写入"
+		+ _writes_msg(player_writes, player_foreign))
+
+	# 扫描器自检：正则不能是「空转」的（否则上面两条断言永远是绿的）。
+	var probe_src := "\tpl.global_position = Vector2.ZERO\n\tpl.set_position(Vector2.ZERO)\n\tsprite.position.y = 1.0\n"
+	var probe_foreign := _foreign_writes(_position_writes(probe_src))
+	_fails += _check(probe_foreign.size() == 3,
+		"[§3-13] 扫描器自检：能识别 3 种外来位置写入形态"
+		+ "（`<对象>.global_position =` / `<对象>.set_position(` / `<对象>.position.y =`）"
+		+ "　实扫到 %d 处：%s" % [probe_foreign.size(), _fmt_writes(probe_foreign)])
+	var probe_allowed := _foreign_writes(_position_writes(probe_src, [OWN_SPRITE]))
+	_fails += _check(probe_allowed.size() == 2,
+		"[§3-13] 扫描器自检：豁免名单生效（自有子节点 %s 不算外来写入）"
+		% OWN_SPRITE
+		+ "　豁免后实扫到 %d 处" % probe_allowed.size())
+
+	# ==================================================================
 	# 收尾：释放实例
 	# ==================================================================
 	if player != null:
@@ -429,6 +576,10 @@ func _boot() -> void:
 		light_player.queue_free()
 	if patrol_guard != null:
 		patrol_guard.queue_free()
+	if beh_guard != null:
+		beh_guard.queue_free()
+	if beh_sub != null:
+		beh_sub.queue_free()
 	if guard != null:
 		guard.queue_free()
 	rpc.queue_free()
@@ -475,6 +626,79 @@ func _has_word(src: String, token: String) -> bool:
 	if re.compile("\\b%s\\b" % token) != OK:
 		return src.contains(token)
 	return re.search(src) != null
+
+
+## 结构化扫描：找出源码里的**位置写入**。
+##
+## 查的是**赋值形态**（不是查某个词）：
+##   * `<接收者>.position = / += / -= …`、`<接收者>.global_position = …`
+##   * `<接收者>.position.<分量> = …`（例如 `sprite.position.y = 1.0`）
+##   * `<接收者>.set_position(…)` / `<接收者>.set_global_position(…)`
+##
+## **自身**的写入（不带接收者，如 `global_position = position`）不是外来写入。
+## allowed_receivers：豁免的**自有子节点**引用（自己的 sprite）。
+##
+## 返回 [{line, text, receiver, kind}]，kind ∈ {self, allowed, foreign}。
+func _position_writes(src: String, allowed_receivers: Array = []) -> Array:
+	var out: Array = []
+	var re_prop := RegEx.new()
+	re_prop.compile("([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*\\.\\s*(position|global_position)\\s*(?:=|\\+=|-=|\\*=|/=)")
+	var re_comp := RegEx.new()
+	re_comp.compile("([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*\\.\\s*(position|global_position)\\s*\\.\\s*[xyzw]\\s*(?:=|\\+=|-=|\\*=|/=)")
+	var re_setter := RegEx.new()
+	re_setter.compile("([A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s*\\.\\s*set_(?:global_)?position\\s*\\(")
+	var re_self := RegEx.new()
+	re_self.compile("^\\s*(position|global_position)\\s*(?:=|\\+=|-=|\\*=|/=)")
+	var lines := src.split("\n")
+	for i in lines.size():
+		var raw: String = lines[i]
+		var text := raw.strip_edges()
+		if text.is_empty() or text.begins_with("#"):
+			continue        # 空行 / 整行注释：不是代码
+		var recv := ""
+		var kind := ""
+		var m := re_prop.search(raw)
+		if m == null:
+			m = re_comp.search(raw)
+		if m == null:
+			m = re_setter.search(raw)
+		if m != null:
+			recv = m.get_string(1)
+			kind = "allowed" if allowed_receivers.has(recv) else "foreign"
+		elif re_self.search(raw) != null:
+			kind = "self"
+		if kind == "":
+			continue
+		out.append({"line": i + 1, "text": text, "receiver": recv, "kind": kind})
+	return out
+
+
+## 只挑出「外来」的写入（写的是**别的对象**的位置）。
+func _foreign_writes(writes: Array) -> Array:
+	var out: Array = []
+	for w in writes:
+		if str(w.get("kind", "")) == "foreign":
+			out.append(w)
+	return out
+
+
+## 把扫描结果排成一行可读的文本（行号 + 原文 + 接收者）。
+func _fmt_writes(writes: Array) -> String:
+	if writes.is_empty():
+		return "（无）"
+	var parts: Array = []
+	for w in writes:
+		var recv := str(w.get("receiver", ""))
+		parts.append("L%d %s%s" % [int(w.get("line", 0)), str(w.get("text", "")),
+			("" if recv == "" else "　→ 接收者 " + recv)])
+	return "；".join(parts)
+
+
+## 扫描结果的说明（违规时列出违规行；合规时列出全部匹配行）。
+func _writes_msg(writes: Array, foreign: Array) -> String:
+	if not foreign.is_empty():
+		return "　违规：" + _fmt_writes(foreign)
+	return "　（扫到 %d 处位置写入，全部合规：%s）" % [writes.size(), _fmt_writes(writes)]
 
 
 ## 方法的**必填**参数个数（-1 = 没这个方法）。
