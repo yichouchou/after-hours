@@ -89,6 +89,86 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
   用测试自己伪造的"投递层"会掩盖真实缺陷（Task 7 审查已实证）。
   → P1 必须有**双进程真实 RPC 测试**（同一条 `tools/test_*.gd` 内用 `OS.execute` 拉起两个真 Godot 进程，
   走真实的 `rpc_id` 投递），否则 Task 13 手动验收会反复踩同一批坑。
+- **「零引擎 ERROR / WARNING」这类断言必须配反向自检**（故意造一条噪声 → 断言确实判失败），
+  否则它可能因子进程压掉日志而**恒真**，覆盖声明就不成立（Task 7 修复轮 2 的 N-A 就是这么发生的）。
+  扫噪声用 `contains("ERROR:")` / `contains("WARNING:")` / `contains("SCRIPT ERROR")`
+  （`push_error` / `push_warning` 的输出行首带冒号）。
+
+### 下列裁决由 Task 8–12 的控制器实测得出，**计划正文里对应的写法是错的，照抄会红**
+
+> 每条都标注了「计划正文在哪」。这是给后续实现者的**陷阱清单**。
+
+**Godot 4.7.2 的引擎事实**
+
+- **`.tscn` 里的 `[sub_resource]` 必须写在 `[node]` 之前**（计划 Task 8 的 `player.tscn` 写在场景末尾）。
+  写错的后果是**整个场景解析失败**（`Parse Error: Invalid parameter`），`load()` 返回 `null`。
+- **`SceneReplicationConfig` 的属性键是 `NodePath(".:position")`**，不是 `^"position"`
+  （计划 Task 8 的测试写 `has_property(^"position")` → **恒为 false**）。
+  `property_get_spawn()` 对**不存在的路径**会打引擎 ERROR（`scene_replication_config.cpp:169`）；
+  `has_property()` 不会（可安全用于反向自检）。
+- **`replication_mode`：1 = `ALWAYS`，2 = `ON_CHANGE`**（计划 Task 8 写 `1` 并注释成 `ON_CHANGE` —— 注释是错的）。
+  断言时用**常量** `SceneReplicationConfig.REPLICATION_MODE_ON_CHANGE`，不要写死数字。
+- **纯数字的节点名可用**：`name = "1075349658"` → 路径 `/root/1075349658`，
+  `get_node_or_null("1075349658")` 命中 → 「节点名 = peer id = 权威」的方案成立。
+- **`MultiplayerSpawner.spawn_function` 会被调用，返回节点的自定义名字被保留**
+  （`spawn(733754800)` → `/root/Host/Players/733754800`）→ 玩家生成可以用它统一命名。
+  ⚠ GDScript 的 lambda **按值捕获**，探针里想在 lambda 内观察外部变量会看到旧值。
+- **`Dictionary` 的 String 与 StringName 键可互查**（`d.has("carrot")` 对 `&"carrot"` 键为 true）。
+- **`JSON.parse_string()` 把 `[30,18]` 解析成 `[30.0, 18.0]`（float）** → 转换要显式 `int()` / `float()`。
+- **`--script` 模式下 autoload 实例存在于场景树**（`/root/Session` 可取到），
+  但**编译期**的全局标识符 `Session` 不能当表达式用 → 类型标注与 `Session.new()` 都会编译失败。
+
+**Task 8（玩家与地图）**
+
+- `data/map.json` 的道具 tag 必须覆盖 `data/mischief.json` 里**全部** `target_tag`
+  （9 个：carrot/hat/basket/chair/barrel/lamp/bench/pot/sign）→ 否则 Task 10 会出现「目标不存在」。
+- `scripts/game/world_map.gd` 是**纯逻辑层**：不许 `get_tree()` / `get_node()`；`FileAccess` / `JSON` 允许。
+- 贴图索引用 `posmod(player_index, 6)`（`%` 对负数返回负数）。
+
+**Task 9（守卫与押送）**
+
+- **`begin_carry()` 无参**（计划 Produces 写 `begin_carry(peer_id)`、参考实现写 `begin_carry()`、测试调无参 —— 三者不自洽）。
+- **CARRY / RETURN 的早退分支必须插在 `update()` 的 ctx 解析之后**（`visible` / `noise_active` 是局部变量，
+  插在开头会 `Compile Error`）。
+- **CHASE 必须有回落路径**（计划正文没写）→ 跟丢（不可见且 suspicion 归零）→ 离开 CHASE。
+- **「送回出生点」必须真的实现**（计划正文只有一个信号，没有实现代码）。
+  ⚠ **权威冲突**：玩家位置是**拥有者权威** → **房主不许直接写远端玩家的 `position`**
+  → 必须是**被抓玩家自己**朝自己的出生点移动。出生点**每人一个**（镇口两侧）。
+- **`light_factor` 不许写死 1.0**（计划正文 `var light := 1.0`）→ 「拔路灯让守卫视野 -40%」这条核心玩法才生效。
+  规则：守卫 5 格（160 px）内每有一盏**熄灭**的路灯 → `light_factor *= 0.6`。
+- **`scripts/net/game_rpc.gd` 由 Task 9 创建**（计划里 Task 11 引用了它，却没有任何任务创建 → 计划有洞）；
+  Task 10 在同一文件追加 `submit_mischief` / `resolve_mischief`。
+
+**Task 10（捣蛋交互与裁决）**
+
+- **`behavior_id` 必须真的进广播载荷**（计划写的是空串）→ 载荷固定 4 字段
+  `{peer_id, behavior_id, success, reason}`。
+- **`has_partner` / `needs_partner` 不许硬编码** → `needs_partner` 取自 `Mischief.needs_partner`；
+  `has_partner` 取自实际搭档状态。**缺搭档时所需时间是 2 倍**（效率减半）。
+- **`target_id` 的「先到先得」台账在房主侧**（`Rules` 是无状态单次裁决，不裁决归属）；
+  落败方**不扣分、不淘汰**（零失败惩罚）。
+- **`caught` 用 `reason` 表达**，不额外进载荷（`reason == "caught"` ⇔ `caught`）。
+- **两个抓捕通道必须分开**：守卫通道（Task 9，任意时刻可触发）vs 裁决通道（Task 10，只在完成瞬间）。
+  `Rules.evaluate()` **只在完成瞬间**调用；`reason == "in_progress"` 是**非终态**。
+- `Interaction.find_prop_in_range` **可以**拿 Node2D 参数、**可以**读 `global_position`
+  （Pre-flight 裁定），但**不许**调 `get_tree()` / `get_node()`，且必须对**脱离场景树**的节点可用。
+
+**Task 11（镇子场景与 HUD）**
+
+- **玩家生成必须统一用 `MultiplayerSpawner`**（计划正文两套机制打架）：
+  设 `spawn_function` 命名 + 房主 `spawner.spawn(peer_id)`；
+  **禁止** `players_root.add_child(p)`（手搓的节点在客户端根本不存在）。
+- **`player_index` 必须是稳定的 0–5 序号**，不能是 `peer_id - 1`（客户端 peer id 是随机 32 位数）。
+- **HUD 显示的是自己那一份清单** —— 房主侧 `Session.deal()` 返回**全员**手牌，不许直接拿来显示。
+
+**Task 12（回合流程与端到端冒烟）**
+
+- **`--script` 模式的测试里不能用 `Session` 当类型标注，也不能 `Session.new()`** → 用不带标注的
+  `get_node_or_null("Session")` 与 `preload("res://scripts/net/session.gd").new()`。
+  （场景脚本里 `var _session: Session = null` 是**正常项目模式**，照抄没问题。）
+- **`resolve_mischief` 是 4 个参数**（计划冒烟测试调了 3 个）→ `resolve_mischief(1, &"steal_carrot", true, "ok")`。
+- 冒烟测试的端口**不要用 27017**（与 Task 6 的 27015–27024 撞车）→ 用 27050。
+- **`round_started` / `round_ended` 的广播 Task 7 已经做了** → Task 12 核实即可，不要重复实现。
 
 
 
