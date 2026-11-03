@@ -1,0 +1,15 @@
+[gd_scene load_steps=3 format=3 uid="uid://cep8lahoi2h82"]
+
+[ext_resource type="Script" uid="uid://dod0wv8hdsu7w" path="res://scripts/mischief_prop.gd" id="1_prop"]
+[ext_resource type="Texture2D" uid="uid://dgmfwfb4pw048" path="res://assets/props/prop_lamp.png" id="2_tex"]
+
+[node name="MischiefProp" type="Node2D"]
+script = ExtResource("1_prop")
+prop_tag = &"lamp"
+prop_id = 0
+lamp_on = true
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+texture = ExtResource("2_tex")
+centered = false
+offset = Vector2(-16, -32)
