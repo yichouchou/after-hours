@@ -50,6 +50,23 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
   Godot 4.7.2 不支持嵌套带类型数组（解析期报 "Nested typed collections are not supported."）。
   调用侧写 `var deals := MischiefDeck.generate(...)` 或 `var deals: Array[Array] = ...` 都可以。
 
+### 联网层的既定裁决（Task 6 / Task 7，2026-11-04）
+
+- **大厅名单一律以房主为权威**：Godot 4 的 ENet server-relay 下，**客户端侧的 `Transport.peer_list()` 只含服务器（id 1）**，
+  relay peer 只在 `MultiplayerAPI.get_peers()` 可见 → 客户端用本地 `peer_list()` 算人数，**3 人以上必错**。
+  → 名单由房主维护并**广播**；客户端以收到的名单为准。
+- **清单必须定向发给本人**：房主生成清单后**按 peer id 定向发送**（每个客户端只拿到自己那一份），
+  不能把整副牌广播出去（否则客户端能看见别人的清单）。
+- **成员表以玩家 id 为键，不用 peer id**：ENet 客户端 peer id 是**随机 32 位数**，且**重连会换一个新的 peer id**。
+- **Session 必须自带连接超时兜底**：ENet 的 connect timeout 不可配置，「连不上服务器」的失败信号实测要 ≈31.5 秒才发出
+  （远超 `--quit-after 600`）→ Session 用 Timer 兜底，超时后主动 `close()` peer。
+- **踢人 / 通知对端必须用 `disconnect_peer()`**：server 侧 `close()` **不会**通知 client
+  （实测 client 仍停在 CONNECTED 120 帧）；`disconnect_peer(id)` 实测 1 帧内对端即知情。
+- **重连时对端收不到任何 `peer_disconnected`**：旧 peer 的事件绑定在 close 之前就被解开了（不是被抑制标志挡掉的）。
+- **`attach_to()` 必须在 host/join 成功之后调用**（`_peer == null` 时 `attach_to()` 是静默空操作）；
+  但**重试不需要重新 `attach_to()`**（join 成功会自动把 mp 换绑到新 peer）。
+
+
 ## 规格来源
 
 完整设计见 `docs/superpowers/specs/2026-11-03-after-hours-design.md`。本计划只覆盖其中的 **Phase 1**；P2（Steam）、P3（内容与美术）、P4（AI NPC）、P5（上架）各自另写计划。
