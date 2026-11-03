@@ -18,7 +18,12 @@
 - 玩法逻辑文件（`scripts/game/**`）**禁止**引用 `get_tree()` / `get_node()` / 场景节点；它们必须是纯函数或纯状态对象
 - **Gameplay 层禁止出现任何 `Steam.` 调用**；Steam 代码只允许出现在 `scripts/net/steam_transport.gd`
 - 测试一律用 headless 脚本，退出码 0 = 通过，1 = 失败：
-  `godot --headless --path <proj> --script res://tools/test_<name>.gd`
+  `godot --headless --path <proj> --quit-after 600 --script res://tools/test_<name>.gd`
+  **必须带 `--quit-after`**：本测试形态（`extends SceneTree` + `await` + `quit()`）在脚本发生
+  运行时错误时协程会被中断、`quit()` 永不执行，进程会**永久挂起而不是失败退出**。
+  `--quit-after` 是命令行侧保险，不需改动任何测试代码。
+- **判定测试通过 = 退出码为 0 且输出含 `TEST PASSED`**（两者都要看）。
+  `--quit-after` 兜底退出时退出码是 0，脚本中途抛错时输出里不会有 `TEST PASSED`。
 - 每个任务结束必须 `git commit`
 - **零失败惩罚**：任何被测逻辑都不得产生"扣分/淘汰/扣命"的返回值
 - 命名：类名用 PascalCase，文件名用 snake_case，私有成员前缀 `_`
