@@ -42,9 +42,10 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
 - **规则 3/4/5 的作用域 = 每份清单各自成立**（不是整副牌一起成立）。
   理由：规则 1 要求 6 人局每人 5 张 = 30 张牌，而 P1 只有 10 条行为（设计文档全量 20 条也只够 4 人局铺满），
   「整副牌不重复发牌」在 4-6 人局**数学上不可实现**，故整副牌读法被排除。
-- **规则 6 = 每份清单两两不同（不同的子集），不要求跨玩家互斥**。
-  同一张捣蛋牌可以同时出现在多名玩家的清单里，5-6 人局不可避免。
+- **规则 6 = 每份清单两两不同，按「集合」口径判定**（两份清单包含的行为**集合**不得相同，顺序无关）。
+  这不等于「整副牌不重复发牌」：同一张捣蛋牌可以同时出现在多名玩家的清单里，5-6 人局不可避免。
   Task 10 的房主裁决必须给出**先到先得**的归属规则，且**落败方不扣分**（零失败惩罚）。
+  集合口径在数学上可达（10 条行为的 5 张合法集合共 138 个，`_build_hand` 可达 87 个，6 人局只需 6 个互不相同）。
 - **`MischiefDeck.generate()` 返回类型是 `Array[Array]`，不是 `Array[Array[Mischief]]`**：
   Godot 4.7.2 不支持嵌套带类型数组（解析期报 "Nested typed collections are not supported."）。
   调用侧写 `var deals := MischiefDeck.generate(...)` 或 `var deals: Array[Array] = ...` 都可以。
@@ -467,15 +468,17 @@ git commit -m "feat: 占位美术素材管线（Pillow 程序化生成）"
   - `class_name Mischief extends Resource`，字段 `id: StringName`、`title: String`、`category: StringName`、`target_tag: StringName`、`needs_partner: bool`、`duration: float`、`points: int`
   - `Mischief.load_all(path: String = "res://data/mischief.json") -> Array[Mischief]`
   - `class_name MischiefDeck extends RefCounted`
-  - `MischiefDeck.generate(all: Array[Mischief], player_count: int, rng: RandomNumberGenerator, available_tags: Array[StringName]) -> Array[Array[Mischief]]` —— 返回每人一张牌数组，长度 = player_count
+  - `MischiefDeck.generate(all: Array[Mischief], player_count: int, rng: RandomNumberGenerator, available_tags: Array[StringName]) -> Array[Array]` —— 返回每人一张牌数组，长度 = player_count。
+    返回类型只能是 `Array[Array]`：Godot 4.7.2 不支持嵌套带类型数组（`Array[Array[Mischief]]` 解析期直接报错）。
 
 **生成规则（必须逐条实现并被测试覆盖）**
 1. 每人的牌数 `N = clamp(player_count + 1, 3, 5)`
 2. 池子里只保留 `target_tag` 出现在 `available_tags` 中的行为
-3. 同类（category）总数不超过 2
-4. 至少 1 张 `noise` 或 `decor`
-5. 至少 1 张 `prank`
-6. 洗牌后轮流发给各玩家 → 每人拿到不同的子集
+3. 同类（category）在**每份清单内**不超过 2（作用域 = 每份清单各自成立，见下方裁决）
+4. **每份清单**至少有 1 张 `noise` 或 `decor`
+5. **每份清单**至少有 1 张 `prank`
+6. 每人拿到不同的子集 —— **按集合口径判定**（两份清单包含的行为集合不得相同，顺序无关）；
+   允许跨玩家持有同一张牌（4-6 人局不可避免，见下方裁决）
 
 - [ ] **Step 1: 写失败的测试**
 
@@ -668,8 +671,8 @@ const MAX_PER_CATEGORY := 2
 
 ## 返回每人一张牌数组，长度 = player_count。
 static func generate(all: Array[Mischief], player_count: int,
-		rng: RandomNumberGenerator, available_tags: Array[StringName]) -> Array[Array[Mischief]]:
-	var deal: Array[Array[Mischief]] = []
+		rng: RandomNumberGenerator, available_tags: Array[StringName]) -> Array[Array]:
+	var deal: Array[Array] = []
 	for i in player_count:
 		deal.append([] as Array[Mischief])
 	if player_count <= 0 or all.is_empty():
