@@ -9,7 +9,7 @@ extends RefCounted
 ##   3. 同类（category）不超过 2
 ##   4. 至少 1 张 noise 或 decor
 ##   5. 至少 1 张 prank
-##   6. 任意两份清单都不相同（不同的子集）
+##   6. 任意两份清单的**行为集合**都不相同（集合口径：顺序无关，即"不同的子集"）
 ##
 ## 跨玩家重叠契约：同一行为**可以**被多名玩家同时持有。P1 只有 10 条行为、
 ## 最多 6 名玩家，"整副牌不重复发牌"在 4-6 人局数学上不可实现。
@@ -53,20 +53,34 @@ static func generate(all: Array[Mischief], player_count: int,
 	return deal
 
 
-## 给第 index 位玩家成一份 n 张的清单，并保证不与已发出的任何一份相同。
+## 给第 index 位玩家成一份 n 张的清单，并保证不与已发出的任何一份**行为集合**相同。
 ##
 ## 起点来源：每位玩家**独立**洗牌（消费 rng），再按 attempt 在整副牌上轮转起点。
 ## 候选因此覆盖全部 size 个起点 + 多种牌序，而不是只落在 (player_index * n) % size
 ## 那条等差数列上（那样 4-6 人局只能取到 2 个起点，多名玩家必然拿到同一份清单）。
 static func _build_unique_hand(pool: Array[Mischief], n: int, rng: RandomNumberGenerator,
 		deal: Array[Array], index: int) -> Array[Mischief]:
+	# 池子里每个类别的牌都不超过 2 张时，任何一份清单都必然包含池子里**全部**的牌
+	# （类别上限拦不下任何一张，补齐张数只会重复已有的牌）→ 可达的行为集合恒为 1 个，
+	# 重抽也不可能给出不同的集合 → 直接返回，不白跑 32 次重抽。
+	# （池子太小的既有契约保持不变：允许重复，不返回空清单、不崩溃。）
+	if _single_set_only(pool):
+		var only := pool.duplicate()
+		_shuffle(only, rng)
+		return _build_hand(only, n, 0)
+
 	var hand: Array[Mischief] = []
+	var tried := {}
 	for attempt in MAX_HAND_ATTEMPTS:
 		var deck := pool.duplicate()
 		_shuffle(deck, rng)
 		hand = _build_hand(deck, n, attempt % deck.size())
 		if not _has_same(hand, deal, index):
 			return hand
+		tried[_set_key(hand)] = true
+		# 候选集合已穷举：允许重复，返回当前这份
+		if tried.size() >= _max_distinct_sets(pool.size(), n):
+			break
 	# 池子小到数学上无法给出两份不同的清单：允许重复，返回最后一份候选。
 	return hand
 
@@ -133,20 +147,50 @@ static func _ensure_category(hand: Array[Mischief], deck: Array[Mischief], cats:
 				return
 
 
-## hand 是否和已发出的某份清单完全一样。dealt 是已发出的份数（只看前面那几份）。
+## hand 是否和已发出的某份清单包含**相同的行为集合**（规则 6 集合口径：顺序无关）。
 static func _has_same(hand: Array[Mischief], deal: Array[Array], dealt: int) -> bool:
+	var key := _set_key(hand)
 	for j in dealt:
 		var other: Array = deal[j]
-		if other.is_empty() or other.size() != hand.size():
+		if other.is_empty():
 			continue
-		var same := true
-		for i in hand.size():
-			if hand[i].id != other[i].id:
-				same = false
-				break
-		if same:
+		if _set_key(other) == key:
 			return true
 	return false
+
+
+## 清单的行为 id 集合（去重 + 排序，顺序无关）。规则 6 的比较口径。
+static func _set_key(list: Array) -> String:
+	var ids: Array[String] = []
+	for m in list:
+		var id := String(m.id)
+		if not ids.has(id):
+			ids.append(id)
+	ids.sort()
+	return "|".join(ids)
+
+
+## 池子里每个类别的牌都不超过 2 张吗？
+## 是的话，任何一份清单都必然包含池子里**全部**的牌（类别上限拦不下任何一张），
+## 可达的"行为集合"恒为 1 个 → 规则 6 在这种池子上数学上不可满足。
+static func _single_set_only(pool: Array[Mischief]) -> bool:
+	var per_cat := {}
+	for m in pool:
+		var c: int = int(per_cat.get(m.category, 0)) + 1
+		if c > MAX_PER_CATEGORY:
+			return false
+		per_cat[m.category] = c
+	return true
+
+
+## 池子能产生的不同"行为集合"数量的上界：Σ C(size, k)，k = 1..min(n, size)。
+static func _max_distinct_sets(size: int, n: int) -> int:
+	var total := 0
+	var comb := 1
+	for k in range(1, mini(n, size) + 1):
+		comb = comb * (size - k + 1) / k
+		total += comb
+	return total
 
 
 static func _shuffle(arr: Array, rng: RandomNumberGenerator) -> void:

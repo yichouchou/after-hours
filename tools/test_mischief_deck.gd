@@ -113,7 +113,15 @@ func _boot() -> void:
 		fails += _check(bad_rules.is_empty(),
 			"%d 人局 × 12 种子：每份清单都满足规则 3/4/5%s" % [pc, _first(bad_rules)])
 		fails += _check(bad_rule6.is_empty(),
-			"%d 人局 × 12 种子：任意两份清单都不相同%s" % [pc, _first(bad_rule6)])
+			"%d 人局 × 12 种子：任意两份清单的行为集合都不相同%s" % [pc, _first(bad_rule6)])
+
+	# 集合口径自检：两份"集合相同、顺序不同"的清单必须被判为撞车。
+	# 旧的逐位比较看不出这种撞车 —— 上一轮审查实测 6 人局 14.23% 的局存在这种撞车。
+	var fake := _fake_same_set_deal()
+	fails += _check(_ids(fake[0]) != _ids(fake[1]),
+		"集合口径自检：这两份清单的有序 id 列表确实不同（旧的有序比较会漏掉它）")
+	fails += _check(not _duplicate_hands(fake).is_empty(),
+		"集合口径自检：集合相同但顺序不同的两份清单被判为重复")
 
 	# 稀缺但仍够 3 张且类别够分：每人仍拿满 clampi(2+1,3,5)=3 张，且用尽所有可用牌
 	var scarce: Array[StringName] = [&"carrot", &"pot"]
@@ -206,14 +214,40 @@ func _rule_violations(deal: Array) -> Array[String]:
 	return bad
 
 
-## 遍历所有两两组合，找出拿到相同清单的玩家对（规则 6）。
+## 遍历所有两两组合，找出**行为集合相同**的玩家对（规则 6，集合口径：顺序无关）。
 func _duplicate_hands(deal: Array) -> Array[String]:
 	var bad: Array[String] = []
 	for i in deal.size():
 		for j in range(i + 1, deal.size()):
-			if _ids(deal[i]) == _ids(deal[j]):
-				bad.append("P%d 与 P%d 清单相同：%s" % [i, j, str(_ids(deal[i]))])
+			if _set_key(deal[i]) == _set_key(deal[j]):
+				bad.append("P%d 与 P%d 清单集合相同：%s" % [i, j, _set_key(deal[i])])
 	return bad
+
+
+## 清单的行为 id 集合（去重 + 排序，顺序无关）—— 规则 6 的集合口径。
+func _set_key(list: Array) -> String:
+	var ids: Array[String] = []
+	for m in list:
+		var id := String(m.id)
+		if not ids.has(id):
+			ids.append(id)
+	ids.sort()
+	return "|".join(ids)
+
+
+## 造两份"行为集合相同、顺序不同"的清单（旧的逐位比较看不出这种撞车）。
+func _fake_same_set_deal() -> Array:
+	var a: Array[Mischief] = []
+	var b: Array[Mischief] = []
+	var ids := [&"steal_carrot", &"prank_pot", &"noise_pot"]
+	for i in ids.size():
+		var ma := Mischief.new()
+		ma.id = ids[i]
+		a.append(ma)
+		var mb := Mischief.new()
+		mb.id = ids[(i + 1) % ids.size()]
+		b.append(mb)
+	return [a, b]
 
 
 ## 违规列表的首条描述（用于失败诊断）。
