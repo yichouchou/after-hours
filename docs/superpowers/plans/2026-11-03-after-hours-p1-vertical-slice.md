@@ -65,6 +65,17 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
 - **重连时对端收不到任何 `peer_disconnected`**：旧 peer 的事件绑定在 close 之前就被解开了（不是被抑制标志挡掉的）。
 - **`attach_to()` 必须在 host/join 成功之后调用**（`_peer == null` 时 `attach_to()` 是静默空操作）；
   但**重试不需要重新 `attach_to()`**（join 成功会自动把 mp 换绑到新 peer）。
+- **`Session` 脚本不带 `class_name`**，autoload 名字就是 `Session`。
+  原因（Task 7 实测）：Godot 4.7.2 里 `class_name Session` + 同名 autoload **互斥** ——
+  报 `Parse Error: Class "Session" hides an autoload singleton`，autoload 加载失败、项目起不来。
+  去掉 `class_name` 后，autoload 名字 `Session` 同时充当**全局标识符与类型**（Godot 4 标准写法）。
+  → 代价：**`Session.new()` 不可用**（autoload 标识符不能当表达式用），
+  需要实例化时用 `preload("res://scripts/net/session.gd").new()`（测试就是这么做的）。
+- **网络载荷必须是纯数据**：`Mischief` 是 `Resource` 且由 `Mischief.new()` 运行时创建（无 `resource_path`），
+  **不可被 RPC 编码** → 发清单时必须先转成**基础类型字典**（`id/title/category/target_tag/needs_partner/duration/points`），
+  客户端收到后**本地重建** `Mischief` 对象。
+  `Session.deal()` 在房主与客户端两端都返回 `Mischief` 对象的数组，调用方（Task 10 裁决 / Task 11 HUD）不需要知道线格式。
+
 
 
 ## 规格来源
