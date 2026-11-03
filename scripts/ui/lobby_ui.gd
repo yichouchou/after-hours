@@ -12,6 +12,16 @@ const JOIN_ADDRESS := "127.0.0.1"
 ## 开局后要进的场景。任务 8 才建这个场景；缺失时交给 Router 安全跳过。
 const GAME_SCENE := "res://scenes/game.tscn"
 
+## 对局场景的路径（**可覆盖**）。
+##
+## 默认值与 GAME_SCENE 完全一致（既有公开行为不变），但它是一个**变量**，
+## 这样测试可以注入一个**假路径**来强制走「场景缺失」分支 ——
+## 覆盖就不必依赖「`res://scenes/game.tscn` 恰好还不存在」这个会随 Task 8 失效的前提。
+##
+## ★ **存在性判定与 router.goto() 的目标必须用同一个变量**：
+##   一个用变量一个用常量的话，注入的路径和实际切换的路径会不一致。
+var game_scene_path: String = GAME_SCENE
+
 @onready var _roster: VBoxContainer = $Center/Panel/Margin/VBox/Roster
 @onready var _status: Label = $Center/Panel/Margin/VBox/Status
 @onready var _host_btn: Button = $Center/Panel/Margin/VBox/HostButton
@@ -62,13 +72,14 @@ func _on_start() -> void:
 	# 对局场景还没建好时**不开回合**：Router 会安全跳过缺失的场景，
 	# 于是就留下「回合开了但人还在大厅」的半成品 —— 牌已经发出去，
 	# 人却卡在大厅里（Task 8 建好 game.tscn 之前不能这样）。
-	if not ResourceLoader.exists(GAME_SCENE):
-		_status.text = "对局场景还没建好（%s 缺失），暂时开不了局" % GAME_SCENE
+	# **判定与切换用的是同一个变量**（game_scene_path），不能一个用变量一个用常量。
+	if not ResourceLoader.exists(game_scene_path):
+		_status.text = "对局场景还没建好（%s 缺失），暂时开不了局" % game_scene_path
 		return
 	_session.start_round()
 	var router := get_node_or_null("/root/Router")
 	if router != null:
-		router.goto(GAME_SCENE)
+		router.goto(game_scene_path)
 
 
 func _on_roster(_peers: Array[int]) -> void:

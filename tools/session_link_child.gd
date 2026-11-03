@@ -9,8 +9,20 @@ extends SceneTree
 ##   端口 = 27040（避开 Task 6 的 27015-27024 与 Task 7 单进程测试的 27030-27033）
 ##
 ## 结果用 `LINK|` 开头的行写到 stdout，父进程解析。
-## 本进程**只输出 LINK| 行**：引擎日志一律压掉（Engine.print_error_messages = false），
-## 父进程要把子进程的输出**捕获**而不是继承，否则父进程的 stdout 会被子进程的日志弄脏。
+##
+## ★ **引擎的错误/告警输出保持打开**（修复轮 2 / N-A）：
+##   修复轮 1 用 `Engine.print_error_messages = false` 把它们**整体压掉**了，
+##   于是父进程那条「子进程零 ERROR/WARNING」断言**恒为 true**（虚假覆盖）。
+##   压掉它们**不会**弄脏父进程的 stdout —— 父进程是用
+##   `OS.execute(..., read_stderr=true)` **捕获**子进程的 stdout+stderr 的，不是继承。
+##   修复轮 2 另加一个「噪声探针」子进程（第三个 user arg = "noise"），
+##   故意打出 ERROR/WARNING，让父进程能证明那条断言**确实有检测力**。
+##
+## ★ **Session 实例走生产用的 autoload**（修复轮 2 / F2-3）：
+##   真实对局走的是 `project.godot` 的 autoload `/root/Session`。
+##   本子进程**优先**用它；拿不到才自己 new 一个并**显式命名为 "Session"**
+##   （让 RPC 的节点路径与生产逐字一致）。解析结果回报给父进程
+##   （`session_path=` / `session_source=`），由父进程断言路径是 `/root/Session`。
 ##
 ## ------------------------------------------------------------------
 ## 【房主必须比客户端活得久】（修复轮 1 的关键实测）
@@ -50,6 +62,12 @@ const STEP_SEC := 0.05
 var _mode := "host"
 var _port := 27040
 var _session = null
+## Session 实例的来源："autoload"（生产用的 /root/Session）或 "new_named"（兜底自建）。
+var _session_source := ""
+## Session 实例的绝对路径（父进程要断言它是 /root/Session）。
+var _session_path := ""
+## 噪声探针模式（第三个 user arg = "noise"）：故意打出引擎 ERROR / WARNING。
+var _noise_mode := false
 var _t0 := 0
 
 var _roster: Array[int] = []
@@ -68,8 +86,11 @@ var _conn_lost_ms := 0
 
 
 func _initialize() -> void:
-	# 引擎日志一律压掉：本进程只输出 LINK| 行。
-	Engine.print_error_messages = false
+	# **刻意不压制引擎错误输出**（修复轮 2 / N-A）：
+	# 父进程要靠子进程 stderr 里的 ERROR / WARNING 行，来证明「零 ERROR/WARNING」
+	# 这条断言**有检测力**。整体压掉它会让那条断言恒为 true（虚假覆盖）。
+	# 父进程是**捕获**（OS.execute + read_stderr=true）而不是继承子进程的输出，
+	# 所以打开引擎日志不会污染父进程的 stdout。
 	call_deferred("_boot")
 
 
@@ -79,25 +100,64 @@ func _boot() -> void:
 		_mode = str(args[0])
 	if args.size() >= 2:
 		_port = int(args[1])
+	# 第三个 user arg = "noise" → **噪声探针模式**（修复轮 2 / N-A 的反向自检）：
+	# 故意打出引擎 ERROR / WARNING，父进程据此证明「零 ERROR/WARNING」断言有检测力。
+	# 形如 `-- host 27040 noise`（mode/port 在噪声模式下无意义，不碰网络）。
+	if args.size() >= 3 and str(args[2]) == "noise":
+		_noise_mode = true
 	_t0 = Time.get_ticks_msec()
 
-	_session = SessionScript.new()
-	root.add_child(_session)
+	_resolve_session()
 	_session.set_transport(ENetTransport.new())
 	_session.roster_changed.connect(_on_roster)
 	_session.round_started.connect(_on_round_started)
 	_session.round_ended.connect(_on_round_ended)
 
-	if _mode == "host":
+	if _noise_mode:
+		await _run_noise()
+	elif _mode == "host":
 		await _run_host()
 	else:
 		await _run_client()
 	_report()
 	# 房主回报之后还要再活一会儿（见文件头）：客户端的回报时刻在房主退出之前。
-	if _mode == "host":
+	if _mode == "host" and not _noise_mode:
 		while Time.get_ticks_msec() < _t0 + HOST_EXIT_MS:
 			await create_timer(0.1).timeout
 	quit(0)
+
+
+## 解析要用的 Session 实例（修复轮 2 / F2-3）。
+##
+## **优先用生产用的 autoload**（`/root/Session`）—— 双进程测试必须走生产路径，
+## 否则「autoload 路径两端一致」这句话永远没被实测过。
+## `--script` 模式下 autoload **确实存在**（修复轮 2 实测，证据见 task-7-report.md §3.3）。
+##
+## 兜底：autoload 拿不到时自己 new 一个，并**显式命名为 "Session"** 再 add_child，
+## 这样 RPC 的节点路径与生产**逐字一致**（`/root/Session`）。
+func _resolve_session() -> void:
+	var auto_node = root.get_node_or_null("Session")
+	if auto_node != null:
+		_session = auto_node
+		_session_source = "autoload"
+	else:
+		_session = SessionScript.new()
+		_session.name = "Session"
+		root.add_child(_session)
+		_session_source = "new_named"
+	_session_path = str(_session.get_path())
+
+
+## 噪声探针（修复轮 2 / N-A 的反向自检）。
+##
+## 故意用引擎的 `push_error` / `push_warning` 打出 ERROR / WARNING 行，
+## 然后短暂停留（1.5 秒）让输出稳定刷出来，最后**正常退出**（退出码 0）。
+## 父进程据此断言：这些行**确实**会让「零 ERROR/WARNING」那条断言判失败
+## —— 证明那条断言有检测力，而不是恒真。
+func _run_noise() -> void:
+	push_error("SELFTEST_ENGINE_NOISE")
+	push_warning("SELFTEST_ENGINE_WARNING")
+	await create_timer(1.5).timeout
 
 
 func _run_host() -> void:
@@ -171,6 +231,9 @@ func _on_round_ended(_summary: Dictionary) -> void:
 func _report() -> void:
 	var t: Variant = _session.get("_transport")
 	_link("mode=%s" % _mode)
+	# F2-3：Session 实例的**绝对路径**与**来源**（父进程据此断言路径是 /root/Session）
+	_link("session_path=%s" % _session_path)
+	_link("session_source=%s" % _session_source)
 	_link("host_err=%d" % _host_err)
 	_link("join_err=%d" % _join_err)
 	_link("is_host=%d" % (1 if _session.is_host() else 0))

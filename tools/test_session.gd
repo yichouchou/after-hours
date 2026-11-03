@@ -67,9 +67,16 @@ const LOBBY_PATHS := [
 ## 惩罚性 token（零失败惩罚）。只扫源码。
 ## 注意**不含 "points"**：Mischief 的 points 是「这条行为值多少分」的数据字段
 ## （data/mischief.json 里本来就有，且线格式必须原样带过去），不是「扣分」。
-## 「线格式里不许多出扣分字段」由更精确的断言把住（见 _check_wire_format）。
+## 「线格式里不许多出扣分字段」由更精确的断言把住
+## （见本文件第 4 节里那条内联检查：`_sorted_keys(d) != _sorted_list(WIRE_FIELDS)`）。
 const PENALTY_TOKENS := ["penalty", "penalized", "score", "score_delta",
-	"lives_lost", "eliminated", "hp", "damage", "扣分", "扣命", "淘汰", "死亡"]
+	"lives_lost", "eliminated", "damage", "扣分", "扣命", "淘汰", "死亡"]
+
+## 两字母的惩罚性 token 必须**按词边界**匹配（修复轮 2 / N-E）。
+## `contains("hp")` 是**子串**扫，会把 `graph`、`shape` 之类无关代码误报成「出现扣血」
+## —— 将来 Task 9/10 引入无关代码时测试就会无端变红。
+## `\bhp\b` 只在 hp 作为一个**独立的词/标识符**出现时才命中，真实检测力不减。
+const PENALTY_WORD_TOKENS := ["hp"]
 
 ## 线格式固定字段清单（控制器已落笔进计划，下游不许各自发明）。
 const WIRE_FIELDS := ["id", "title", "category", "target_tag",
@@ -477,16 +484,25 @@ func _boot() -> void:
 
 	# ==================================================================
 	# 8. 大厅界面：对局场景缺失时**不许**开局（不许留半成品）
-	#    Task 8 之前 res://scenes/game.tscn 还不存在，Router 会安全跳过它；
-	#    如果这时候照样开回合，就会留下「回合开了但人还在大厅」的半成品。
+	#    对局场景缺失时开回合，就会留下「回合开了但人还在大厅」的半成品。
+	#    ★ 这里**注入一个假路径**（而不是依赖「res://scenes/game.tscn 恰好还不存在」）：
+	#      那个前提会随 Task 8 建出 game.tscn 而失效 → 整节测试当场变红。
+	#      注入假路径后，这条覆盖在 Task 8 前后**都存在**。
+	#    ★ 真实场景**存在**时的开局行为（点开始 → 开回合 → 切场景）**不在本轮覆盖**，
+	#      留给 Task 8 / Task 11 的测试范围（见 task-7-report.md §3.4）。
 	# ==================================================================
-	_fails += _check(not ResourceLoader.exists("res://scenes/game.tscn"),
-		"前提：Task 8 之前 game.tscn 确实还不存在")
+	const MISSING_SCENE := "res://scenes/__scene_missing_for_test__.tscn"
+	_fails += _check(not ResourceLoader.exists(MISSING_SCENE),
+		"前提：注入的假场景路径确实不存在")
 	var lobby_packed: PackedScene = load("res://scenes/lobby.tscn")
 	if lobby_packed != null:
 		var lobby2 = lobby_packed.instantiate()
 		root.add_child(lobby2)
 		await process_frame
+		# 注入假路径 → 强制走「场景缺失」分支
+		lobby2.set("game_scene_path", MISSING_SCENE)
+		_fails += _check(str(lobby2.get("game_scene_path")) == MISSING_SCENE,
+			"大厅的对局场景路径可被注入（实际 '%s'）" % str(lobby2.get("game_scene_path")))
 		var s_lobby = _new_session()
 		s_lobby.set_transport(ENetTransport.new())
 		var e_lobby := s_lobby.host_game(LOBBY_PORT)
@@ -511,6 +527,15 @@ func _boot() -> void:
 		lobby2.queue_free()
 		await process_frame
 
+	# 静态断言把住「场景存在性守卫还在」（不靠行为间接推断）
+	var ui_src := _read_source("res://scripts/ui/lobby_ui.gd")
+	_fails += _check(ui_src.contains("ResourceLoader.exists(game_scene_path)"),
+		"lobby_ui.gd 仍然有对局场景的存在性判定（守卫没被删）")
+	_fails += _check(ui_src.contains("router.goto(game_scene_path)"),
+		"lobby_ui.gd 的 router.goto() 目标与存在性判定用的是同一个变量")
+	_fails += _check(ui_src.contains("var game_scene_path: String = GAME_SCENE"),
+		"lobby_ui.gd 的 game_scene_path 默认值仍是 res://scenes/game.tscn")
+
 	# ==================================================================
 	# 9. 纯净化 + 零失败惩罚
 	# ==================================================================
@@ -519,15 +544,20 @@ func _boot() -> void:
 	for path in net_files:
 		var src := _read_source(path)
 		_fails += _check(not src.contains("Steam."), "%s 不出现 Steam. 调用" % path)
-	var ui_src := _read_source("res://scripts/ui/lobby_ui.gd")
 	_fails += _check(not ui_src.contains("Steam."), "scripts/ui/lobby_ui.gd 不出现 Steam. 调用")
 	var session_src := _read_source("res://scripts/net/session.gd")
 	for token in PENALTY_TOKENS:
 		_fails += _check(not session_src.contains(token),
 			"Session 不出现惩罚性 token「%s」（零失败惩罚）" % token)
+	for token in PENALTY_WORD_TOKENS:
+		_fails += _check(not _has_word(session_src, token),
+			"Session 不出现惩罚性 token「%s」（独立词，零失败惩罚）" % token)
 	for token in PENALTY_TOKENS:
 		_fails += _check(not ui_src.contains(token),
 			"lobby_ui.gd 不出现惩罚性 token「%s」（零失败惩罚）" % token)
+	for token in PENALTY_WORD_TOKENS:
+		_fails += _check(not _has_word(ui_src, token),
+			"lobby_ui.gd 不出现惩罚性 token「%s」（独立词，零失败惩罚）" % token)
 
 	# ==================================================================
 	# 10. 收尾：释放会话与端口
@@ -729,6 +759,19 @@ func _read_source(path: String) -> String:
 	if f == null:
 		return ""
 	return f.get_as_text()
+
+
+## 源码里有没有出现「作为一个独立词」的 token（**词边界匹配**，修复轮 2 / N-E）。
+##
+## 为什么要词边界：`contains("hp")` 是**子串**扫，`graph` / `shape` 之类无关代码
+## 会被误报成「出现扣血」。`\bhp\b` 只在 hp 作为独立标识符/词出现时才命中。
+## ★ **不得削弱真实检测力**：独立的 `hp` 仍然会被扫出（反向自检见报告 §3.5）。
+func _has_word(src: String, token: String) -> bool:
+	var re := RegEx.new()
+	if re.compile("\\b%s\\b" % token) != OK:
+		# 正则编译失败时**退回子串匹配**（宁可多报，不可漏报）
+		return src.contains(token)
+	return re.search(src) != null
 
 
 func _check(ok: bool, what: String) -> int:

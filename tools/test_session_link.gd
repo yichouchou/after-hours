@@ -41,6 +41,8 @@ extends SceneTree
 ##   ④ 客户端收到的**只有自己那一份**清单（不泄漏别人的）
 
 const HOST_PORT := 27040
+## 噪声探针子进程用的端口（**不碰网络**，只是让参数形状与另外两个子进程一致）。
+const NOISE_PORT := 27041
 const CHILD_SCRIPT := "res://tools/session_link_child.gd"
 ## 子进程的兜底退出帧数。
 ## **注意**：headless 实测 ~146 fps（不是 60），所以「N 帧」远小于「N/60 秒」：
@@ -169,6 +171,33 @@ func _boot() -> void:
 	_fails += _check(_no_engine_noise(client_out),
 		"客户端子进程输出里没有 ERROR / WARNING 行")
 
+	# --- ⑤ F2-3：Session 实例走的是生产用的 /root/Session 路径（两端都要一致）---
+	_fails += _check(host.get("session_path", "") == "/root/Session",
+		"房主子进程的 Session 在生产用的路径 /root/Session 上（实际 '%s'，来源 %s）"
+		% [str(host.get("session_path", "")), str(host.get("session_source", ""))])
+	_fails += _check(client.get("session_path", "") == "/root/Session",
+		"客户端子进程的 Session 在生产用的路径 /root/Session 上（实际 '%s'，来源 %s）"
+		% [str(host.get("session_path", "")), str(client.get("session_source", ""))])
+	# `--script` 模式下 autoload 确实存在（修复轮 2 实测）→ 两端都直接用 autoload 实例
+	_fails += _check(host.get("session_source", "") == "autoload",
+		"房主子进程用的是 autoload 实例（实测 --script 模式下 autoload 存在）")
+	_fails += _check(client.get("session_source", "") == "autoload",
+		"客户端子进程用的是 autoload 实例（实测 --script 模式下 autoload 存在）")
+
+	# --- ⑥ F2-2 反向自检：噪声探针证明「零 ERROR/WARNING」这条断言**有检测力** ---
+	# 修复轮 1 时子进程用 `Engine.print_error_messages = false` 压掉了引擎日志，
+	# 于是上面那两条断言**恒为 true**（虚假覆盖）。修复轮 2 恢复了引擎输出，
+	# 并用第三个子进程（噪声探针）证明：真出现 ERROR/WARNING 时，它**确实会失败**。
+	var noise_args := _child_args(proj, "host", NOISE_PORT, "noise")
+	var noise_out: Array = []
+	var noise_code := OS.execute(exe, noise_args, noise_out, true)
+	_fails += _check(noise_code == 0,
+		"噪声探针子进程正常退出（实际 %d）" % noise_code)
+	_fails += _check(_has_engine_noise(noise_out),
+		"噪声探针子进程确实打出了 ERROR / WARNING 行（反向自检的前提）")
+	_fails += _check(not _no_engine_noise(noise_out),
+		"反向自检：噪声探针让「零 ERROR/WARNING」断言确实判失败（该断言有检测力，不是恒真）")
+
 	print("")
 	print("断言总数：%d" % _total)
 	if _fails == 0:
@@ -181,19 +210,26 @@ func _boot() -> void:
 		print("---- 客户端子进程输出 ----")
 		for line in client_out:
 			print("  C| " + str(line))
+		print("---- 噪声探针子进程输出 ----")
+		for line in noise_out:
+			print("  N| " + str(line))
 		print("TEST FAILED: %d 项" % _fails)
 		quit(1)
 
 
 ## 子进程的启动参数。
-func _child_args(proj: String, mode: String, port: int) -> PackedStringArray:
-	return PackedStringArray([
+## `flag` 非空时追加为**第三个** user arg（噪声探针用）。
+func _child_args(proj: String, mode: String, port: int, flag: String = "") -> PackedStringArray:
+	var args := PackedStringArray([
 		"--headless",
 		"--path", proj,
 		"--quit-after", CHILD_QUIT_AFTER,
 		"--script", CHILD_SCRIPT,
 		"--", mode, str(port),
 	])
+	if flag != "":
+		args.append(flag)
+	return args
 
 
 ## 解析子进程输出里的 `LINK|key=value` 行。
@@ -217,14 +253,26 @@ func _parse(out: Array) -> Dictionary:
 
 
 ## 子进程输出里有没有引擎报错/告警行。
+##
+## ★ **匹配用 `contains` 而不是 `begins_with`**（修复轮 2 / N-A）：
+##   实测（Godot 4.7.2）`push_error` 的行首是 `ERROR: <消息>`、
+##   `push_warning` 是 `WARNING: <消息>`，但引擎还有 `USER ERROR:` / `SCRIPT ERROR:`
+##   等其它前缀 —— `begins_with("ERROR")` 会**漏检**它们。
+##   `contains("ERROR:")` / `contains("WARNING:")` 把这些前缀**全部**覆盖，
+##   是**放宽**（更灵敏），不是收紧。
+##   （实测证据见 task-7-report.md §3.2 的噪声探针原始输出。）
 func _no_engine_noise(out: Array) -> bool:
+	return not _has_engine_noise(out)
+
+
+## 子进程输出里有没有引擎报错/告警行（`_no_engine_noise()` 的反面）。
+func _has_engine_noise(out: Array) -> bool:
 	for chunk in out:
 		for raw in str(chunk).split("\n"):
 			var line := raw.strip_edges()
-			if line.begins_with("ERROR") or line.begins_with("SCRIPT ERROR") \
-					or line.begins_with("WARNING"):
-				return false
-	return true
+			if line.contains("ERROR:") or line.contains("WARNING:"):
+				return true
+	return false
 
 
 func _check(ok: bool, what: String) -> int:
