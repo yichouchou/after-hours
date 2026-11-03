@@ -27,6 +27,9 @@ extends SceneTree
 const HOST_PORT := 27015
 const ATTACH_PORT := 27016
 const LATCH_PORT := 27017
+const RETRY_PORT := 27018
+const NEW2_PORT := 27019
+const NEW3_PORT := 27020
 
 var _host: ENetTransport
 var _client: ENetTransport
@@ -34,6 +37,10 @@ var _attach_host: ENetTransport
 var _attach_client: ENetTransport
 var _latch_server: ENetTransport
 var _latch_client: ENetTransport
+var _retry_host: ENetTransport
+var _retry_client: ENetTransport
+var _new2_host: ENetTransport
+var _new3_host: ENetTransport
 
 var _fails := 0
 var _total := 0
@@ -61,6 +68,13 @@ var _attach_client_connection_failed_count := 0
 var _retry_failure_count := 0
 var _latch_server_connected_count := 0
 var _latch_failure_count := 0
+
+# 重新 join / 失败路径 / 重新 attach 用例的信号计数
+var _retry_connected_ids: Array[int] = []
+var _retry_server_connected_count := 0
+var _retry_connection_failed_count := 0
+var _new3_server_connected_count := 0
+var _new3_connection_failed_count := 0
 
 # 已经 close 过的 peer，避免二次 close 触发引擎 ERR_FAIL_COND
 var _closed_peers: Array[MultiplayerPeer] = []
@@ -340,8 +354,116 @@ func _boot() -> void:
 		"同一对象重连成功后 server_connected 再发 1 次（共 2 次），实际 %d 次" % _latch_server_connected_count)
 
 	# ==================================================================
-	# 7. 收尾：关掉所有 peer，释放端口
+	# 7. attached 模式下同一对象重试 join()（NEW-1）
+	#    mp 必须跟着换绑到新 peer，否则新 peer 无人 poll，连接永远建立不起来；
+	#    而且换绑顺序不对的话，mp 会因为「旧连接被本层关掉」报出一条伪 connection_failed。
 	# ==================================================================
+	var retry_mp := MultiplayerAPI.create_default_interface()
+	_retry_host = ENetTransport.new()
+	var e_rh := _retry_host.host(RETRY_PORT, 4)
+	_fails += _check(e_rh == OK, "重试用例的 host 创建成功")
+
+	_retry_client = ENetTransport.new()
+	_retry_client.peer_connected.connect(func(id): _retry_connected_ids.append(id))
+	_retry_client.server_connected.connect(func(): _retry_server_connected_count += 1)
+	_retry_client.connection_failed.connect(func(): _retry_connection_failed_count += 1)
+	var e_rj := _retry_client.join("127.0.0.1", RETRY_PORT)
+	_fails += _check(e_rj == OK, "重试用例第一次 join 成功")
+	_retry_client.attach_to(retry_mp)
+	_fails += _check(retry_mp.multiplayer_peer == _retry_client.get_peer(),
+		"重试用例：attach 之后 mp 绑定的是当前 peer")
+
+	for i in 120:
+		_retry_host.poll()
+		retry_mp.poll()
+		await process_frame
+		if _retry_server_connected_count == 1:
+			break
+	_fails += _check(_retry_server_connected_count == 1,
+		"重试用例第一次连接成功，server_connected 发 1 次，实际 %d 次" % _retry_server_connected_count)
+
+	# 同一个对象重新 join()：mp 必须换绑到新 peer，新 peer 才能被驱动。
+	var e_rejoin := _retry_client.join("127.0.0.1", RETRY_PORT)
+	_fails += _check(e_rejoin == OK, "attached 模式重新 join 返回 OK")
+	for i in 120:
+		_retry_host.poll()
+		retry_mp.poll()
+		await process_frame
+		if _retry_server_connected_count == 2:
+			break
+	_fails += _check(_retry_server_connected_count == 2,
+		"attached 模式重新 join 后 server_connected 再发 1 次（共 2 次），实际 %d 次" % _retry_server_connected_count)
+	_fails += _check(_retry_client.get_peer().get_connection_status() == MultiplayerPeer.CONNECTION_CONNECTED,
+		"attached 模式重新 join 后新 peer 真的连上了（status=%d）"
+		% _retry_client.get_peer().get_connection_status())
+	_fails += _check(retry_mp.multiplayer_peer == _retry_client.get_peer(),
+		"attached 模式重新 join 后 mp 绑定的是新 peer")
+	_fails += _check(_retry_connection_failed_count == 0,
+		"attached 模式重新 join 过程中不得产生伪 connection_failed，实际 %d 次" % _retry_connection_failed_count)
+
+	# ==================================================================
+	# 8. 失败路径状态自洽（NEW-2）
+	#    join 失败之后：get_peer() == null、get_peer_id() == 1、is_host() == false，
+	#    而且不能留下一个「已被本层关掉」的旧 peer 让上层拿到
+	#    （否则 get_peer_id() 会返回 0，既不是合法 peer id 也不是约定的 1）。
+	# ==================================================================
+	_new2_host = ENetTransport.new()
+	var e_n2 := _new2_host.host(NEW2_PORT, 4)
+	_fails += _check(e_n2 == OK, "失败路径用例的 host 创建成功")
+	_fails += _check(_new2_host.get_peer() != null, "失败路径用例：host 成功时 get_peer() 非 null")
+
+	# 预期失败：压掉引擎自身的 ERROR 日志，保持测试输出干净。
+	Engine.print_error_messages = false
+	var e_bad := _new2_host.join("不是一个服务器地址", NEW2_PORT)
+	Engine.print_error_messages = true
+	_fails += _check(e_bad != OK, "失败路径用例：非法地址 join 返回非 OK 的 Error（实际 %d）" % e_bad)
+	# 这三个调用如果落在已被关掉的旧 peer 上，引擎会打 ERROR；
+	# 外面包一层压制以保持输出干净（真正的判据是下面三个返回值断言：
+	# 旧 peer 的 get_unique_id() 返回 0，与约定的 1 不同）。
+	Engine.print_error_messages = false
+	var peer_after_fail := _new2_host.get_peer()
+	var id_after_fail := _new2_host.get_peer_id()
+	var host_after_fail := _new2_host.is_host()
+	Engine.print_error_messages = true
+	_fails += _check(peer_after_fail == null, "失败路径：join 失败后 get_peer() == null")
+	_fails += _check(id_after_fail == 1,
+		"失败路径：join 失败后 get_peer_id() == 1（约定的无 peer 值），实际 %d" % id_after_fail)
+	_fails += _check(not host_after_fail, "失败路径：join 失败后 is_host() == false")
+	_fails += _check(_new2_host.peer_list().is_empty(),
+		"失败路径：join 失败后 peer_list() 为空，实际 %s" % str(_new2_host.peer_list()))
+
+	# ==================================================================
+	# 9. 重新 attach 到新的 mp（NEW-3）
+	#    旧 mp 必须解除信号绑定：不再转发，而且 mp 持有的 transport 强引用会释放。
+	# ==================================================================
+	var mp_a := MultiplayerAPI.create_default_interface()
+	var mp_b := MultiplayerAPI.create_default_interface()
+	_new3_host = ENetTransport.new()
+	var e_n3 := _new3_host.host(NEW3_PORT, 4)
+	_fails += _check(e_n3 == OK, "重新 attach 用例的 host 创建成功")
+	_new3_host.server_connected.connect(func(): _new3_server_connected_count += 1)
+	_new3_host.connection_failed.connect(func(): _new3_connection_failed_count += 1)
+	_new3_host.attach_to(mp_a)
+	_new3_host.attach_to(mp_b)
+	# 旧 mp 不再转发
+	mp_a.emit_signal("connected_to_server")
+	mp_a.emit_signal("connection_failed")
+	_fails += _check(_new3_server_connected_count == 0,
+		"重新 attach 后旧 mp 不再转发 server_connected，实际 %d 次" % _new3_server_connected_count)
+	_fails += _check(_new3_connection_failed_count == 0,
+		"重新 attach 后旧 mp 不再转发 connection_failed，实际 %d 次" % _new3_connection_failed_count)
+	# 新 mp 仍然转发
+	mp_b.emit_signal("connected_to_server")
+	_fails += _check(_new3_server_connected_count == 1,
+		"重新 attach 后新 mp 仍然转发 server_connected，实际 %d 次" % _new3_server_connected_count)
+
+	# ==================================================================
+	# 10. 收尾：关掉所有 peer，释放端口
+	# ==================================================================
+	_close_peer(_retry_client.get_peer())
+	_close_peer(_retry_host.get_peer())
+	_close_peer(_new2_host.get_peer())
+	_close_peer(_new3_host.get_peer())
 	_close_peer(_attach_client.get_peer())
 	_close_peer(_attach_host.get_peer())
 	_close_peer(_latch_client.get_peer())

@@ -46,6 +46,11 @@ signal connection_failed()
 
 var _peer: MultiplayerPeer = null
 var _attached := false
+# 已经 attach 的 MultiplayerAPI。保存它有两个原因：
+#   1) 换 peer（重试 join / 重新 host）时要把 mp 换绑到新 peer，
+#      否则 mp 还在 poll 旧 peer，新 peer 没人 poll，永远连不上；
+#   2) 重新 attach 到别的 mp 时要解除旧 mp 的信号绑定。
+var _multiplayer_api: MultiplayerAPI = null
 # 已知 peer id 集合：int -> true
 var _known_peers: Dictionary = {}
 # 「连上服务器 / 连接失败」的一次性闩锁：每次 host()/join() 尝试前复位，
@@ -86,9 +91,16 @@ func poll() -> void:
 ## （见文件头「attached 模式的信号来源」）：
 ## attached 模式下即使上层不调用 poll()，server_connected / connection_failed
 ## 也照常发出。
+##
+## 重新 attach 到另一个 mp 时，旧 mp 的信号绑定会被解除（旧 mp 不再转发，
+## mp 持有的 transport 强引用也会释放）。
 func attach_to(mp: MultiplayerAPI) -> void:
 	if _peer == null:
 		return
+	# 先解除旧 mp 的绑定：旧 mp 不能再转发，而且 mp 持有 transport 的强引用
+	#（RefCounted），不解除的话 transport 永远回收不了。
+	_unbind_multiplayer_api()
+	_multiplayer_api = mp
 	mp.multiplayer_peer = _peer
 	_attached = true
 	if not mp.connected_to_server.is_connected(_on_mp_connected_to_server):
@@ -97,6 +109,20 @@ func attach_to(mp: MultiplayerAPI) -> void:
 		mp.connection_failed.connect(_on_mp_connection_failed)
 	if not mp.server_disconnected.is_connected(_on_mp_server_disconnected):
 		mp.server_disconnected.connect(_on_mp_server_disconnected)
+
+
+## 解除当前 MultiplayerAPI 上的信号绑定（并忘掉 mp 引用）。
+func _unbind_multiplayer_api() -> void:
+	if _multiplayer_api == null:
+		return
+	var mp := _multiplayer_api
+	if mp.connected_to_server.is_connected(_on_mp_connected_to_server):
+		mp.connected_to_server.disconnect(_on_mp_connected_to_server)
+	if mp.connection_failed.is_connected(_on_mp_connection_failed):
+		mp.connection_failed.disconnect(_on_mp_connection_failed)
+	if mp.server_disconnected.is_connected(_on_mp_server_disconnected):
+		mp.server_disconnected.disconnect(_on_mp_server_disconnected)
+	_multiplayer_api = null
 
 
 func is_attached() -> bool:
@@ -127,8 +153,12 @@ func peer_list() -> Array[int]:
 	return out
 
 
-## 绑定底层 peer：保存引用 + 订阅原生 peer 信号。
+## 绑定底层 peer：保存引用 + 订阅原生 peer 信号 + 把已挂载的 mp 换绑到新 peer。
 ## 由具体实现（host / join 成功后）调用。
+##
+## 换绑 mp 的顺序很重要：**必须先让 mp 指向新 peer，再由调用方去 close 旧 peer**。
+## 否则 mp 仍在 poll 旧 peer，close 掉它会让 mp 报出一条「旧连接断了」，
+## 上层读起来像「重试失败」，而重试其实还没开始。
 func _set_peer(p: MultiplayerPeer) -> void:
 	if _peer != null and _peer != p:
 		# 解开旧 peer 的信号绑定：否则 peer → callable → transport → peer
@@ -136,15 +166,34 @@ func _set_peer(p: MultiplayerPeer) -> void:
 		_unbind_peer(_peer)
 	_peer = p
 	_known_peers.clear()
-	# 换 peer = 新的连接尝试：复位两个闩锁，
-	# 否则重试 / 重连时 server_connected / connection_failed 会被静默吞掉。
-	_reset_connection_latches()
 	if _peer == null:
+		_reset_connection_latches()
 		return
 	if not _peer.peer_connected.is_connected(_on_peer_connected):
 		_peer.peer_connected.connect(_on_peer_connected)
 	if not _peer.peer_disconnected.is_connected(_on_peer_disconnected):
 		_peer.peer_disconnected.connect(_on_peer_disconnected)
+	# 已挂载时：把 mp 换绑到新 peer。否则 mp 还在 poll 旧 peer，
+	# 新 peer 没人 poll，连接永远建立不起来。
+	if _attached and _multiplayer_api != null:
+		_multiplayer_api.multiplayer_peer = _peer
+	# 换 peer = 新的连接尝试：复位两个闩锁，
+	# 否则重试 / 重连时 server_connected / connection_failed 会被静默吞掉。
+	# 放在换绑之后：换绑过程中 mp 报出来的任何信号都不应该被当成这次尝试的结果。
+	_reset_connection_latches()
+
+
+## 清空本层的 peer 状态（解开信号绑定 + `_peer = null` + 清空已知 peer 集合）。
+##
+## host() / join() 失败时必须调用：否则 get_peer() 仍返回上一个 peer，
+## 而那个 peer 往往已经被本层关掉（status = 0），
+## get_peer_id() 会返回 0（既不是合法 peer id，也不是约定的「无 peer」值 1），
+## is_host() 也会失真，而且引擎会对未激活的 peer 打 ERROR。
+func _clear_peer_state() -> void:
+	if _peer != null:
+		_unbind_peer(_peer)
+	_peer = null
+	_known_peers.clear()
 
 
 ## 解开某个 peer 上的原生信号绑定。

@@ -25,32 +25,30 @@ var _enet: ENetMultiplayerPeer = null
 
 
 func host(port: int, max_clients: int) -> Error:
-	# 新的尝试：复位闩锁（失败也要能被报出来），并关掉上一个 peer。
+	# 新的尝试：复位闩锁（失败也要能被报出来）。
 	_reset_connection_latches()
-	_close_previous_peer()
 	var enet := ENetMultiplayerPeer.new()
 	var err := enet.create_server(port, max_clients)
 	if err != OK:
 		# 端口被占等失败：create_server 失败后这个 peer 并没有激活，
 		# 不能 close（close 对未激活的 peer 会触发引擎 ERR_FAIL_COND），
 		# 直接丢弃即可。
+		_drop_current_peer()
 		_emit_connection_failed()
 		return err
-	_enet = enet
-	_set_peer(_enet)
+	_swap_peer(enet)
 	return OK
 
 
 func join(address: String, port: int) -> Error:
 	_reset_connection_latches()
-	_close_previous_peer()
 	var enet := ENetMultiplayerPeer.new()
 	var err := enet.create_client(address, port)
 	if err != OK:
+		_drop_current_peer()
 		_emit_connection_failed()
 		return err
-	_enet = enet
-	_set_peer(_enet)
+	_swap_peer(enet)
 	return OK
 
 
@@ -73,12 +71,44 @@ func poll() -> void:
 	super.poll()
 
 
-## 关掉上一个 peer（如果还活着），避免端口泄漏 / 旧连接残留。
+## 换上新 peer：先让 mp（如果已挂载）指向新 peer，再关掉旧 peer。
 ##
-## 已经被 close 掉（或已经断开）的 peer 再 close 会触发引擎 ERR_FAIL_COND，
-## 所以用连接状态判断：DISCONNECTED 一律不再 close。
-func _close_previous_peer() -> void:
-	if _enet == null:
+## 顺序不能反：先关旧 peer 的话，mp 还在 poll 它，会报出一条「旧连接断了」的
+## 伪 connection_failed；而且新 peer 没人 poll，连接永远建立不起来。
+func _swap_peer(new_peer: ENetMultiplayerPeer) -> void:
+	var old := _enet
+	_enet = new_peer
+	# _set_peer 内部会把已挂载的 mp 换绑到新 peer。
+	_set_peer(_enet)
+	# 旧 peer 此时已经不在 mp 上了，close 它是安全的（端口 / socket 立即释放）。
+	_close_peer(old)
+
+
+## 失败路径：把本层的 peer 状态清空并自洽。
+##
+## 失败之后 get_peer() 必须是 null、get_peer_id() 必须是约定的 1、is_host() 必须是 false，
+## 而且不能留下一个「已被本层关掉」的旧 peer 让上层拿到（那会让 get_peer_id() 返回 0）。
+func _drop_current_peer() -> void:
+	var old := _enet
+	_enet = null
+	_clear_peer_state()
+	if is_attached():
+		# 已挂 mp：旧 peer 还挂在 mp 上，mp 会继续 poll 它。
+		# 这时候**不能** close 它——mp 之后 poll 一个未激活的 peer 会打
+		# "The multiplayer instance isn't currently active."。
+		# 旧 peer 的信号绑定已在 _clear_peer_state() 里解开了，不会再往上传。
 		return
-	if _enet.get_connection_status() != MultiplayerPeer.CONNECTION_DISCONNECTED:
-		_enet.close()
+	# 没挂 mp：旧 peer 只有本层引用，直接释放。
+	_close_peer(old)
+
+
+## 关闭一个 peer（如果还活着）。
+##
+## 已经被 close 掉 / 已经断开的 peer 再 close 会触发引擎 ERR_FAIL_COND，
+## 所以用连接状态判断：DISCONNECTED 一律不再 close。
+func _close_peer(p: ENetMultiplayerPeer) -> void:
+	if p == null:
+		return
+	if p.get_connection_status() == MultiplayerPeer.CONNECTION_DISCONNECTED:
+		return
+	p.close()
