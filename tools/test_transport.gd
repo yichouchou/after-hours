@@ -10,7 +10,8 @@ extends SceneTree
 ##   2. host 创建；同端口二次 host 失败 → 非 OK 的 Error + connection_failed()
 ##   3. 握手：双方互相看到对方；peer_connected 两端都发；server_connected 只发一次
 ##   4. client 关闭 → host 收到 peer_disconnected
-##   5. attach_to：挂上之后 poll() 不再驱动底层 peer（改由 MultiplayerAPI 驱动）
+##   5. attach_to：挂上之后 poll() 不再驱动底层 peer；信号照常发出（attached 模式）
+##   6. 闩锁复位：同一对象重试 / 重连时信号不被静默吞掉
 ##
 ## 【夹具修正】brief 第 53 行原断言写死「host 看到 peer 2」。
 ## Godot 4.7.2 实测：ENet 客户端的 unique id 是 create_client 时随机生成的 32 位整数
@@ -18,15 +19,21 @@ extends SceneTree
 ## 所以这里改成「host 看到的那唯一一个 peer == client 自己的 peer id」，
 ## 并额外断言 peer_connected 信号带的就是同一个 id——语义没有被削弱，反而更强。
 ##
-## 端口：27015（主握手）/ 27016（attach_to 用），测试收尾全部 close() 释放。
+## 端口：27015（主握手）/ 27016（attach_to 用）/ 27017（闩锁用例），收尾全部 close() 释放。
+##
+## 注意：预期失败的调用（二次 host、非法地址 join）会触发引擎自身的 ERROR 日志，
+## 包裹在 Engine.print_error_messages = false 里，保证测试输出干净。
 
 const HOST_PORT := 27015
 const ATTACH_PORT := 27016
+const LATCH_PORT := 27017
 
 var _host: ENetTransport
 var _client: ENetTransport
 var _attach_host: ENetTransport
 var _attach_client: ENetTransport
+var _latch_server: ENetTransport
+var _latch_client: ENetTransport
 
 var _fails := 0
 var _total := 0
@@ -41,6 +48,19 @@ var _client_server_connected_count := 0
 var _host_connection_failed_count := 0
 var _client_connection_failed_count := 0
 var _double_host_connection_failed_count := 0
+
+# attach_to 用例的信号计数（C1：attached 模式下信号必须真的发出来）
+var _attach_host_connected_ids: Array[int] = []
+var _attach_client_connected_ids: Array[int] = []
+var _attach_host_server_connected_count := 0
+var _attach_client_server_connected_count := 0
+var _attach_host_connection_failed_count := 0
+var _attach_client_connection_failed_count := 0
+
+# 闩锁复位用例的信号计数
+var _retry_failure_count := 0
+var _latch_server_connected_count := 0
+var _latch_failure_count := 0
 
 # 已经 close 过的 peer，避免二次 close 触发引擎 ERR_FAIL_COND
 var _closed_peers: Array[MultiplayerPeer] = []
@@ -80,7 +100,10 @@ func _boot() -> void:
 	# --- 同一端口二次 host：必须失败并发出 connection_failed() ---
 	var second := ENetTransport.new()
 	second.connection_failed.connect(func(): _double_host_connection_failed_count += 1)
+	# 预期失败：压掉引擎自身的 ERROR 日志，保持测试输出干净。
+	Engine.print_error_messages = false
 	var e_second := second.host(HOST_PORT, 4)
+	Engine.print_error_messages = true
 	_fails += _check(e_second != OK, "同一端口二次 host 返回非 OK 的 Error（实际 %d）" % e_second)
 	_fails += _check(_double_host_connection_failed_count == 1,
 		"同一端口二次 host 发出 connection_failed()（实际 %d 次）" % _double_host_connection_failed_count)
@@ -170,10 +193,16 @@ func _boot() -> void:
 	# ==================================================================
 	var mp := MultiplayerAPI.create_default_interface()
 	_attach_host = ENetTransport.new()
+	_attach_host.peer_connected.connect(func(id): _attach_host_connected_ids.append(id))
+	_attach_host.server_connected.connect(func(): _attach_host_server_connected_count += 1)
+	_attach_host.connection_failed.connect(func(): _attach_host_connection_failed_count += 1)
 	var e_ah := _attach_host.host(ATTACH_PORT, 4)
 	_fails += _check(e_ah == OK, "attach 用例的 host 创建成功")
 
 	_attach_client = ENetTransport.new()
+	_attach_client.peer_connected.connect(func(id): _attach_client_connected_ids.append(id))
+	_attach_client.server_connected.connect(func(): _attach_client_server_connected_count += 1)
+	_attach_client.connection_failed.connect(func(): _attach_client_connection_failed_count += 1)
 	var e_ac := _attach_client.join("127.0.0.1", ATTACH_PORT)
 	_fails += _check(e_ac == OK, "attach 用例的 client 连接请求发出")
 
@@ -184,6 +213,7 @@ func _boot() -> void:
 	_fails += _check(not _attach_host.is_attached(), "没 attach 的 transport is_attached() 仍为 false")
 	_fails += _check(_attach_client.get_peer() != null, "attach_to 之后 get_peer() 非 null")
 
+	# 阶段一：只调 transport.poll()（不调 mp.poll()）。
 	# 挂载之后 transport.poll() 不得再驱动底层 peer：
 	# 客户端 peer 应一直停在 CONNECTING（没人 poll 它），host 也看不到它。
 	for i in 60:
@@ -197,8 +227,13 @@ func _boot() -> void:
 		"已挂载期间 client 并没有真的连上（host 看不到 peer），实际 %s" % str(_attach_host.peer_list()))
 	_fails += _check(_attach_client.peer_list().is_empty(),
 		"已挂载期间 transport 没有发出 peer_connected，实际 %s" % str(_attach_client.peer_list()))
+	_fails += _check(_attach_client_server_connected_count == 0,
+		"已挂载期间 transport 没有发出 server_connected，实际 %d 次" % _attach_client_server_connected_count)
 
-	# 改由 MultiplayerAPI 驱动 → 连接建立，信号照常发出。
+	# 阶段二：改由 MultiplayerAPI 驱动 → 连接建立，信号照常发出。
+	# 这一阶段**不调** _attach_client.poll()：server_connected 只能来自
+	# MultiplayerAPI.connected_to_server —— 证明 attached 模式下不依赖上层
+	# 每帧调用 transport.poll()。
 	var mp_connected := false
 	for i in 120:
 		_attach_host.poll()
@@ -210,6 +245,10 @@ func _boot() -> void:
 	_fails += _check(mp_connected, "由 MultiplayerAPI 驱动 poll 后连接建立")
 	_fails += _check(_attach_client.peer_list() == [1],
 		"已挂载时 peer_connected(1) 照常发出，peer_list 实际 %s" % str(_attach_client.peer_list()))
+	_fails += _check(_attach_client_server_connected_count == 1,
+		"attached 模式下 server_connected() 恰好发 1 次，实际 %d 次" % _attach_client_server_connected_count)
+	_fails += _check(_attach_host_server_connected_count == 0,
+		"attached 模式下 host 不发 server_connected()，实际 %d 次" % _attach_host_server_connected_count)
 
 	# host 侧的 peer_connected 比 client 侧晚一轮（ENet 的连接确认是一次往返：
 	# 探针实测顺序是 client 先收到 peer_connected(1)，host 下一轮才发），
@@ -225,11 +264,88 @@ func _boot() -> void:
 	_fails += _check(host_sees_client,
 		"已挂载时 host 也看得到 client，host.peer_list 实际 %s" % str(_attach_host.peer_list()))
 
+	# 阶段三：房主主动断开这个 client。
+	# 必须用 disconnect_peer（优雅断开），客户端 1 帧内就能发现；
+	# 直接 close() 房主的 peer 不会通知客户端（实测客户端要等 ENet 超时 ≈31.5s）。
+	var attach_client_id := _attach_client.get_peer_id()
+	_attach_host.get_peer().disconnect_peer(attach_client_id)
+	var dropped := false
+	for i in 60:
+		_attach_host.poll()
+		mp.poll()
+		await process_frame
+		if _attach_client_connection_failed_count == 1:
+			dropped = true
+			break
+	_fails += _check(dropped, "attached 模式下掉线后 transport 发出 connection_failed()")
+	_fails += _check(_attach_client_connection_failed_count == 1,
+		"attached 模式下 connection_failed() 恰好发 1 次，实际 %d 次" % _attach_client_connection_failed_count)
+	_fails += _check(_attach_client_server_connected_count == 1,
+		"掉线后 server_connected 不会被重复发，实际 %d 次" % _attach_client_server_connected_count)
+
 	# ==================================================================
-	# 6. 收尾：关掉所有 peer，释放端口
+	# 6. 闩锁复位：同一个对象重试 / 重连时，信号不能被静默吞掉
+	# ==================================================================
+	# (a) 同一对象连续两次 join 失败 → connection_failed 发 2 次。
+	#     用非法地址让 create_client 立刻失败：连死端口要等 ENet 的
+	#     connect timeout（实测 ≈31.5s），不在 --quit-after 600 的预算内。
+	var retry := ENetTransport.new()
+	retry.connection_failed.connect(func(): _retry_failure_count += 1)
+	Engine.print_error_messages = false
+	var re1 := retry.join("不是一个服务器地址", HOST_PORT)
+	var re2 := retry.join("不是一个服务器地址", HOST_PORT)
+	Engine.print_error_messages = true
+	_fails += _check(re1 != OK, "第一次非法地址 join 返回非 OK 的 Error（实际 %d）" % re1)
+	_fails += _check(re2 != OK, "第二次非法地址 join 返回非 OK 的 Error（实际 %d）" % re2)
+	_fails += _check(_retry_failure_count == 2,
+		"同一对象连续两次 join 失败 → connection_failed 发 2 次，实际 %d 次" % _retry_failure_count)
+
+	# (b) 同一对象：join 成功 → 掉线 → 再 join 成功 → server_connected 发 2 次。
+	_latch_server = ENetTransport.new()
+	var e_ls := _latch_server.host(LATCH_PORT, 4)
+	_fails += _check(e_ls == OK, "闩锁用例的 host 创建成功")
+
+	_latch_client = ENetTransport.new()
+	_latch_client.server_connected.connect(func(): _latch_server_connected_count += 1)
+	_latch_client.connection_failed.connect(func(): _latch_failure_count += 1)
+
+	var j1 := _latch_client.join("127.0.0.1", LATCH_PORT)
+	_fails += _check(j1 == OK, "闩锁用例第一次 join 成功")
+	for i in 120:
+		_latch_server.poll()
+		_latch_client.poll()
+		if _latch_server_connected_count == 1:
+			break
+		await process_frame
+	_fails += _check(_latch_server_connected_count == 1,
+		"第一次 join 成功后 server_connected 发 1 次，实际 %d 次" % _latch_server_connected_count)
+
+	# 掉线：关掉客户端自己的 peer，再 poll 一次
+	# （poll 会发现 DISCONNECTED → 发 connection_failed，且不会再碰已关闭的 peer）。
+	_close_peer(_latch_client.get_peer())
+	_latch_client.poll()
+	_fails += _check(_latch_failure_count == 1,
+		"掉线后 connection_failed 发 1 次，实际 %d 次" % _latch_failure_count)
+
+	# 同一个对象再 join 一次 → 闩锁复位 → server_connected 应该再发一次。
+	var j2 := _latch_client.join("127.0.0.1", LATCH_PORT)
+	_fails += _check(j2 == OK, "闩锁用例第二次 join 成功")
+	for i in 120:
+		_latch_server.poll()
+		_latch_client.poll()
+		if _latch_server_connected_count == 2:
+			break
+		await process_frame
+	_fails += _check(_latch_server_connected_count == 2,
+		"同一对象重连成功后 server_connected 再发 1 次（共 2 次），实际 %d 次" % _latch_server_connected_count)
+
+	# ==================================================================
+	# 7. 收尾：关掉所有 peer，释放端口
 	# ==================================================================
 	_close_peer(_attach_client.get_peer())
 	_close_peer(_attach_host.get_peer())
+	_close_peer(_latch_client.get_peer())
+	_close_peer(_latch_server.get_peer())
 	_close_peer(_host.get_peer())
 
 	print("")
