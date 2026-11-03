@@ -20,6 +20,13 @@ const PENALTY_TOKENS := ["penalty", "penalized", "score", "score_delta",
 ## 子串扫会把任何恰好含有相邻字母的无关标识符误判成命中。
 const PENALTY_WORD_TOKENS := ["hp"]
 
+## char_0.png 的不透明像素包围盒**实测** = (14, 7, 50, 63)（64×64 画布）
+## → 画布内 alpha 中心 x = 32.0、alpha 底边 = 64（= 画布高度）。
+## 派单按包围盒 (14, 7, 51, 64) 估成 32.5，与实测差 0.5 px → 这里按**实测值**断言
+## （判据比派单那条更严：|rect.x + 32.0| ≤ 2 同样覆盖 32.5）。
+const ALPHA_CENTER_X := 32.0
+const ALPHA_BOTTOM := 64.0
+
 var _fails := 0
 var _total := 0
 
@@ -70,6 +77,27 @@ func _boot() -> void:
 		if m.target_tag == &"dog":
 			dog_is_target = true
 	_fails += _check(not dog_is_target, "[§4-4] dog 不被任何捣蛋行为当作目标")
+
+	# ==================================================================
+	# [§6-补充] dog 只是装饰彩蛋：它进 available_tags **不改变**清单生成结果
+	# （审查者实测：同 seed 下 MischiefDeck.generate 产出完全一致）
+	# → 把"dog 只是装饰"这个语义钉死，防止以后有人给 dog 加行为。
+	# ==================================================================
+	var tags_no_dog: Array[StringName] = []
+	for m2 in mischief_all:
+		tags_no_dog.append(m2.target_tag)
+	var tags_with_dog: Array[StringName] = []
+	for m3 in mischief_all:
+		tags_with_dog.append(m3.target_tag)
+	tags_with_dog.append(&"dog")
+	var rng_dog := RandomNumberGenerator.new()
+	rng_dog.seed = 20261104
+	var rng_nodog := RandomNumberGenerator.new()
+	rng_nodog.seed = 20261104
+	var deal_dog := MischiefDeck.generate(mischief_all, 4, rng_dog, tags_with_dog)
+	var deal_nodog := MischiefDeck.generate(mischief_all, 4, rng_nodog, tags_no_dog)
+	_fails += _check(_deal_key(deal_dog) == _deal_key(deal_nodog),
+		"[§6-补充] dog 进 available_tags 不改变清单生成结果（同 seed → 同结果）")
 
 	# ==================================================================
 	# [§4-5] 所有道具点位都在地图范围内（0 ≤ x < 30，0 ≤ y < 18）
@@ -143,6 +171,76 @@ func _boot() -> void:
 		"[§4-10] resolve_authority(\"\") == 1（兜底）")
 
 	# ==================================================================
+	# [§4-10-B] 非法输入必须兜底 1（修复轮 1 / F3 + F4）
+	#
+	# 旧实现只看 is_valid_int()，它是**纯字面**判断：
+	#   "007" → 7（前导零被吞 → 与 "7" 撞车）
+	#   "-5" → -5、"0" → 0 → set_multiplayer_authority() 收到非法 id，
+	#        引擎**静默接受**（无 ERROR），但 is_multiplayer_authority() 恒为 false
+	#        → **该玩家永远不响应输入**
+	#   "99999999999999999999" → is_valid_int() 为 true，但 int() **溢出**
+	#        → 打引擎 ERROR（Cannot represent … as a 64-bit signed integer）
+	# 新规则：只接受 ^[1-9][0-9]{0,9}$ 且数值 ∈ [1, 2^31-1]，其余一律兜底 1。
+	# ==================================================================
+	for bad_name in ["007", "-5", "0", "+3", " 12", "2147483648",
+			"99999999999999999999"]:
+		_fails += _check(PlayerScript.resolve_authority(bad_name) == 1,
+			"[§4-10-B] resolve_authority(\"%s\") == 1（非法输入兜底房主）" % bad_name)
+	_fails += _check(PlayerScript.resolve_authority("2147483647") == 2147483647,
+		"[§4-10-B] resolve_authority(\"2147483647\") == 2147483647（2^31-1 是上界）")
+	_fails += _check(PlayerScript.resolve_authority("1") == 1,
+		"[§4-10-B] resolve_authority(\"1\") == 1（最小合法值）")
+
+	# ==================================================================
+	# [§4-10-C] F4 自检：超长数字**不得**打出引擎 ERROR（溢出转换）
+	#
+	# "输出里没有 ERROR 行"没法在**本进程**内自察（引擎错误直接写 stderr）。
+	# → 另起一个 Godot 子进程调用同一个 resolve_authority，把它的 stdout+stderr
+	#   抓回来查 ERROR 行。探针写到 user://（不污染仓库），子进程用 --script user://… 跑。
+	#   做法与 Task 7 的 test_session_link.gd 同款（OS.execute + read_stderr）。
+	# ==================================================================
+	var probe_path := "user://after_hours_task8_overflow_probe.gd"
+	var probe_lines: Array[String] = [
+		"extends SceneTree",
+		"",
+		"func _initialize() -> void:",
+		"\tcall_deferred(\"_boot\")",
+		"",
+		"func _boot() -> void:",
+		"\tvar P := load(\"res://scripts/player.gd\")",
+		"\tprint(\"OVERFLOW|\", P.resolve_authority(\"99999999999999999999\"))",
+		"\tquit(0)",
+		"",
+	]
+	var probe_file := FileAccess.open(probe_path, FileAccess.WRITE)
+	_fails += _check(probe_file != null,
+		"[§4-10-C] 能在 user:// 写出溢出自检探针（%s）" % probe_path)
+	if probe_file != null:
+		probe_file.store_string("\n".join(probe_lines))
+		probe_file.close()
+		var child_out: Array = []
+		var child_args := PackedStringArray([
+			"--headless",
+			"--path", ProjectSettings.globalize_path("res://"),
+			"--quit-after", "120",
+			"--script", probe_path,
+		])
+		var child_code := OS.execute(OS.get_executable_path(), child_args,
+			child_out, true)
+		var child_text := ""
+		for chunk in child_out:
+			child_text += str(chunk)
+		var err_lines: Array[String] = []
+		for line in child_text.split("\n"):
+			if line.contains("ERROR"):
+				err_lines.append(line.strip_edges())
+		_fails += _check(child_code == 0,
+			"[§4-10-C] 溢出自检子进程正常退出（实际 %d）" % child_code)
+		_fails += _check(err_lines.is_empty(),
+			"[§4-10-C] 超长数字**不产生**引擎 ERROR（子进程输出 0 行 ERROR）%s"
+			% _first(err_lines))
+
+	# ==================================================================
 	# [§4-11] 实例化一个名字为 "1075349658" 的 Player 并加入树
 	#         → get_multiplayer_authority() == 1075349658
 	# ==================================================================
@@ -169,6 +267,110 @@ func _boot() -> void:
 			"[§4-12] 非权威方 _physics_process 不改 position/velocity"
 			+ "（position %s → %s，velocity %s → %s）"
 			% [str(pos_before), str(owned.position), str(vel_before), str(owned.velocity)])
+
+		# ==================================================================
+		# [§4-12-B1/B2/B3] 权威守卫必须**可分辨**（修复轮 1 / F2）
+		#
+		# 上面那条 §4-12 在 headless 下**恒真**：没有输入 → dir = Vector2.ZERO
+		# → 权威分支里 velocity.lerp(0) = 0 → move_and_slide() 无位移。
+		# 它只能证明"非权威分支没写 position/velocity"，
+		# **无法证明权威分支存在** —— 删掉守卫它照样 PASS（审查者的变异实验）。
+		# 修法：**注入输入**（Input.action_press("ui_right")）+ 三段式：
+		#   B1 权威是自己 + 注入输入 → 必须移动（正向对照：证明权威分支真在跑）
+		#   B2 非权威     + 同样输入 → 必须不移动（证明守卫在拦）
+		#   B3 权威是自己 + 同样输入 → 必须又移动（证明 B2 的"不动"由权威变化引起）
+		# 每次用完必须 release，否则会污染后续断言。
+		# ==================================================================
+		var local_id: int = root.multiplayer.get_unique_id()
+		owned.set_multiplayer_authority(local_id)
+		_fails += _check(owned.is_multiplayer_authority(),
+			"[§4-12-B1] 权威设成本地 id(%d) 后 is_multiplayer_authority() 为 true"
+			% local_id)
+		var b1_before: Vector2 = owned.position
+		Input.action_press("ui_right")
+		for i in 8:
+			owned.call("_physics_process", 0.016)
+			await physics_frame
+		Input.action_release("ui_right")
+		var b1_dist: float = owned.position.distance_to(b1_before)
+		_fails += _check(b1_dist > 0.5,
+			"[§4-12-B1] 权威是自己 + 注入 ui_right → 位置发生变化（位移 %.3f px）"
+			% b1_dist)
+
+		# B2：把权威换成**不是自己**的 id，注入同样的输入 → 必须一动不动
+		owned.set_multiplayer_authority(local_id + 1)
+		var b2_before: Vector2 = owned.position
+		var b2_vel_before: Vector2 = owned.velocity
+		Input.action_press("ui_right")
+		for i in 8:
+			owned.call("_physics_process", 0.016)
+			await physics_frame
+		Input.action_release("ui_right")
+		_fails += _check(not owned.is_multiplayer_authority(),
+			"[§4-12-B2] 权威换成非本地 id(%d) 后 is_multiplayer_authority() 为 false"
+			% (local_id + 1))
+		_fails += _check(owned.position == b2_before and owned.velocity == b2_vel_before,
+			"[§4-12-B2] 非权威 + 同样的输入 → position/velocity 一动不动"
+			+ "（position %s → %s，velocity %s → %s）"
+			% [str(b2_before), str(owned.position), str(b2_vel_before), str(owned.velocity)])
+
+		# B3：把权威还给自己 → 必须又能动（证明 B2 的"不动"确实由权威变化引起）
+		owned.set_multiplayer_authority(local_id)
+		var b3_before: Vector2 = owned.position
+		Input.action_press("ui_right")
+		for i in 8:
+			owned.call("_physics_process", 0.016)
+			await physics_frame
+		Input.action_release("ui_right")
+		var b3_dist: float = owned.position.distance_to(b3_before)
+		_fails += _check(b3_dist > 0.5,
+			"[§4-12-B3] 权威还给自己 + 注入 ui_right → 又能移动（位移 %.3f px）"
+			% b3_dist)
+		# 还原成与节点名一致的权威（peer id 约定）
+		owned.set_multiplayer_authority(PlayerScript.resolve_authority(owned.name))
+
+		# ==================================================================
+		# [F1] 贴图与碰撞体必须重合：脚底落在 y = 0，视觉中心基本居中。
+		#
+		# 背景：Sprite2D.centered 的默认值是 **true**，而场景里的
+		# offset = (-32, -64) 是**按 centered = false 算出来的** ——
+		# 没写 centered = false 时，绘制矩形 = Rect2(offset - size/2, size)
+		# = (-64, -96, 64, 64)：角色脚底在 y = -32（**浮空 32 px**）、
+		# 整体偏左半个身位，与碰撞体不重合。
+		# 场景显式 centered = false 后：绘制矩形 = Rect2(-32, -64, 64, 64)。
+		# ==================================================================
+		var sprite = owned.get_node_or_null("Sprite2D")
+		_fails += _check(sprite != null, "[F1] 玩家带 Sprite2D")
+		if sprite != null:
+			var rect: Rect2 = sprite.get_rect()
+			_fails += _check(sprite.centered == false,
+				"[F1] Sprite2D.centered == false（offset 按左上角语义算）")
+			_fails += _check(rect.position.y + rect.size.y == 0.0,
+				"[F1] 贴图绘制底落在地面 y = 0（rect %s）" % str(rect))
+			_fails += _check(absf(rect.position.x + ALPHA_CENTER_X) <= 2.0,
+				"[F1] 视觉中心基本居中（|rect.x + %.1f| ≤ 2，实测 %.3f）"
+				% [ALPHA_CENTER_X, absf(rect.position.x + ALPHA_CENTER_X)])
+			var bbox := _alpha_bbox(sprite.texture)
+			_fails += _check(not bbox.is_empty(),
+				"[F1] 能算出贴图的不透明像素包围盒")
+			if not bbox.is_empty():
+				var alpha_bottom: float = rect.position.y + float(bbox[3]) + 1.0
+				var alpha_center_x: float = rect.position.x + (
+						float(bbox[0]) + float(bbox[2])) * 0.5
+				_fails += _check(absf(alpha_bottom) <= 0.001,
+					"[F1] alpha 脚底落在地面 y = 0（局部实测 %.3f）" % alpha_bottom)
+				_fails += _check(absf((float(bbox[3]) + 1.0) - ALPHA_BOTTOM) <= 0.001,
+					"[F1] 不透明像素一直画到画布底边（画布内 %.1f）" % ALPHA_BOTTOM)
+				_fails += _check(absf(alpha_center_x) <= 2.0,
+					"[F1] alpha 视觉中心基本居中（实测局部 %.3f）" % alpha_center_x)
+			var col = owned.get_node_or_null("CollisionShape2D")
+			_fails += _check(col != null, "[F1] 玩家带 CollisionShape2D")
+			if col != null and col.shape is RectangleShape2D:
+				var col_bottom: float = col.position.y + (
+						col.shape as RectangleShape2D).size.y * 0.5
+				_fails += _check(absf(col_bottom - (rect.position.y + rect.size.y)) <= 0.001,
+					"[F1] 碰撞体底 == 贴图脚底（碰撞 %.1f / 贴图 %.1f）"
+					% [col_bottom, rect.position.y + rect.size.y])
 
 		# 补充：贴图索引用 posmod —— player_index = -1 应落到 char_5
 		var neg = packed.instantiate()
@@ -265,6 +467,45 @@ func _read_source(path: String) -> String:
 	if f == null:
 		return ""
 	return f.get_as_text()
+
+
+## 贴图不透明像素的包围盒 [minx, miny, maxx, maxy]（整张透明 → 空数组）。
+##
+## 用来把"角色脚底在哪 / 视觉中心在哪"从**肉眼**变成**可断言的数字**。
+func _alpha_bbox(tex: Texture2D) -> Array:
+	if tex == null:
+		return []
+	var img := tex.get_image()
+	if img == null:
+		return []
+	if img.is_compressed():
+		img.decompress()
+	var minx := 9999
+	var miny := 9999
+	var maxx := -1
+	var maxy := -1
+	for y in img.get_height():
+		for x in img.get_width():
+			if img.get_pixel(x, y).a > 0.0:
+				minx = mini(minx, x)
+				miny = mini(miny, y)
+				maxx = maxi(maxx, x)
+				maxy = maxi(maxy, y)
+	if maxx < 0:
+		return []
+	return [minx, miny, maxx, maxy]
+
+
+## 整副清单的可比键：每份清单的行为 id 集合（排序后用 "|" 连接），份与份之间用 ";" 连接。
+func _deal_key(deal: Array) -> String:
+	var parts: Array[String] = []
+	for hand in deal:
+		var ids: Array[String] = []
+		for m in hand:
+			ids.append(String(m.id))
+		ids.sort()
+		parts.append("|".join(ids))
+	return ";".join(parts)
 
 
 ## 源码里有没有出现「作为一个独立词」的 token（**词边界匹配**）。
