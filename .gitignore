@@ -1,0 +1,9 @@
+.godot/
+*.import
+export_presets.cfg
+build/
+export/
+*.tmp
+steam_appid.txt
+secrets/*.txt
+__pycache__/
