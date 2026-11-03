@@ -1,0 +1,289 @@
+extends SceneTree
+
+## Task 8：玩家角色与拥有者权威同步 —— 单元测试。
+##
+## 覆盖派单 §4 的 14 条断言（下面每段注释标了 [§4-N]）。
+## 另加少量补充断言（贴图取模、不得引用对局场景），不替代任何一条。
+
+## player.gd 没有 class_name（避免占用全局类名，Task 11 可能还要用）→ 这里用 preload。
+const PlayerScript := preload("res://scripts/player.gd")
+
+const PLAYER_SCENE := "res://scenes/player.tscn"
+const WORLD_MAP_SRC := "res://scripts/game/world_map.gd"
+const PLAYER_SRC := "res://scripts/player.gd"
+
+## 惩罚性 token（零失败惩罚）。口径与 tools/test_session.gd 保持一致。
+const PENALTY_TOKENS := ["penalty", "penalized", "score", "score_delta",
+	"lives", "lives_lost", "eliminated", "damage", "扣分", "扣命", "淘汰", "死亡"]
+
+## 两字母的惩罚性 token 必须按**词边界**匹配：
+## 子串扫会把任何恰好含有相邻字母的无关标识符误判成命中。
+const PENALTY_WORD_TOKENS := ["hp"]
+
+var _fails := 0
+var _total := 0
+
+
+func _initialize() -> void:
+	call_deferred("_boot")
+
+
+func _boot() -> void:
+	# ==================================================================
+	# [§4-1] map.json 有 size；size == Vector2i(30, 18)
+	# ==================================================================
+	var map := WorldMap.load_map()
+	_fails += _check(map.has("size"), "[§4-1] 地图有 size")
+	_fails += _check(map.get("ok", false) == true,
+		"[§4-1] 地图加载成功（ok == true），错误信息：%s" % str(map.get("error", "")))
+	_fails += _check(map.get("size") == Vector2i(30, 18),
+		"[§4-1] 地图尺寸是 30×18，实际 %s" % str(map.get("size")))
+
+	# ==================================================================
+	# [§4-2] 道具类型数 ≥ 6；含 carrot / lamp / pot / sign / dog
+	# ==================================================================
+	var props: Dictionary = map.get("props", {})
+	_fails += _check(props.size() >= 6,
+		"[§4-2] 地图至少有 6 类道具，实际 %d" % props.size())
+	for tag in ["carrot", "lamp", "pot", "sign", "dog"]:
+		_fails += _check(props.has(StringName(tag)), "[§4-2] 地图有 %s 道具" % tag)
+
+	# ==================================================================
+	# [§4-3] 跨文件不变量：mischief.json 里每条行为的 target_tag
+	#         在地图上至少有 1 个点位
+	# ==================================================================
+	var mischief_all := Mischief.load_all()
+	_fails += _check(mischief_all.size() > 0, "[§4-3] 捣蛋行为表非空")
+	var missing_targets: Array[String] = []
+	for m in mischief_all:
+		var pts: Array = props.get(m.target_tag, [])
+		if pts.is_empty():
+			missing_targets.append("%s→%s" % [String(m.id), String(m.target_tag)])
+	_fails += _check(missing_targets.is_empty(),
+		"[§4-3] 每条行为的 target_tag 在地图上至少 1 个点位%s" % _first(missing_targets))
+
+	# ==================================================================
+	# [§4-4] dog 不是任何行为的 target_tag（纯装饰彩蛋）
+	# ==================================================================
+	var dog_is_target := false
+	for m in mischief_all:
+		if m.target_tag == &"dog":
+			dog_is_target = true
+	_fails += _check(not dog_is_target, "[§4-4] dog 不被任何捣蛋行为当作目标")
+
+	# ==================================================================
+	# [§4-5] 所有道具点位都在地图范围内（0 ≤ x < 30，0 ≤ y < 18）
+	#        返回的坐标是像素（格坐标 × TILE），这里换算回格坐标再比。
+	# ==================================================================
+	var size: Vector2i = map.get("size", Vector2i.ZERO)
+	var out_of_range: Array[String] = []
+	for tag in props.keys():
+		for pos in props[tag]:
+			var tx := int(pos.x / WorldMap.TILE)
+			var ty := int(pos.y / WorldMap.TILE)
+			if tx < 0 or ty < 0 or tx >= size.x or ty >= size.y:
+				out_of_range.append("%s(%d,%d)" % [String(tag), tx, ty])
+	_fails += _check(out_of_range.is_empty(),
+		"[§4-5] 所有道具点位都在地图范围内%s" % _first(out_of_range))
+
+	# ==================================================================
+	# [§4-6] player.tscn 可 load() 且 instantiate() 不报错
+	# ==================================================================
+	var packed: PackedScene = load(PLAYER_SCENE)
+	_fails += _check(packed != null, "[§4-6] player.tscn 可加载")
+	var player = null
+	if packed != null:
+		player = packed.instantiate()
+		_fails += _check(player != null, "[§4-6] player.tscn 可实例化")
+
+	# ==================================================================
+	# [§4-7] player.tscn 含 MultiplayerSynchronizer
+	# ==================================================================
+	var sync = null
+	if player != null:
+		sync = player.get_node_or_null("MultiplayerSynchronizer")
+		_fails += _check(sync != null, "[§4-7] 玩家带 MultiplayerSynchronizer")
+		_fails += _check(sync is MultiplayerSynchronizer,
+			"[§4-7] MultiplayerSynchronizer 节点类型正确")
+
+	# ==================================================================
+	# [§4-8] replication_config 非 null；属性键是 NodePath(".:position")；
+	#         开启 spawn 同步；同步模式是 ON_CHANGE
+	# ==================================================================
+	if sync != null:
+		var cfg = sync.replication_config
+		_fails += _check(cfg != null, "[§4-8] replication_config 非 null")
+		if cfg != null:
+			var prop := NodePath(".:position")
+			_fails += _check(cfg.has_property(prop),
+				"[§4-8] position 在同步属性里（键 = NodePath(\".:position\")）")
+			_fails += _check(cfg.property_get_spawn(prop),
+				"[§4-8] position 开启 spawn 同步")
+			_fails += _check(
+				cfg.property_get_replication_mode(prop)
+					== SceneReplicationConfig.REPLICATION_MODE_ON_CHANGE,
+				"[§4-8] position 的同步模式是 ON_CHANGE（常量断言，不写死数字）")
+
+			# ==================================================================
+			# [§4-9] 反向自检：has_property(NodePath("position")) 必须为 false
+			#        —— 证明 §4-8 那条不是恒真。
+			#        （has_property 对不存在的路径不打引擎 ERROR，断言安全。）
+			# ==================================================================
+			_fails += _check(not cfg.has_property(NodePath("position")),
+				"[§4-9] 反向自检：has_property(NodePath(\"position\")) 为 false")
+
+	# ==================================================================
+	# [§4-10] resolve_authority 纯函数解析
+	# ==================================================================
+	_fails += _check(PlayerScript.resolve_authority("1075349658") == 1075349658,
+		"[§4-10] resolve_authority(\"1075349658\") == 1075349658")
+	_fails += _check(PlayerScript.resolve_authority("not_a_number") == 1,
+		"[§4-10] resolve_authority(\"not_a_number\") == 1（兜底）")
+	_fails += _check(PlayerScript.resolve_authority("") == 1,
+		"[§4-10] resolve_authority(\"\") == 1（兜底）")
+
+	# ==================================================================
+	# [§4-11] 实例化一个名字为 "1075349658" 的 Player 并加入树
+	#         → get_multiplayer_authority() == 1075349658
+	# ==================================================================
+	var owned = null
+	if packed != null:
+		owned = packed.instantiate()
+		owned.name = "1075349658"
+		root.add_child(owned)
+		await process_frame
+		_fails += _check(owned.get_multiplayer_authority() == 1075349658,
+			"[§4-11] 节点名 = peer id → 权威 = 1075349658，实际 %d"
+			% owned.get_multiplayer_authority())
+
+		# ==================================================================
+		# [§4-12] 非权威方不写 position：权威不是自己时，
+		#         _physics_process 不得改变 position / velocity
+		# ==================================================================
+		var pos_before = owned.position
+		var vel_before = owned.velocity
+		owned.call("_physics_process", 0.016)
+		await physics_frame
+		await physics_frame
+		_fails += _check(owned.position == pos_before and owned.velocity == vel_before,
+			"[§4-12] 非权威方 _physics_process 不改 position/velocity"
+			+ "（position %s → %s，velocity %s → %s）"
+			% [str(pos_before), str(owned.position), str(vel_before), str(owned.velocity)])
+
+		# 补充：贴图索引用 posmod —— player_index = -1 应落到 char_5
+		var neg = packed.instantiate()
+		neg.name = "1075349659"
+		neg.set("player_index", -1)
+		root.add_child(neg)
+		await process_frame
+		var neg_sprite = neg.get_node_or_null("Sprite2D")
+		_fails += _check(neg_sprite != null and neg_sprite.texture != null
+				and neg_sprite.texture.resource_path.ends_with("char_5.png"),
+			"[补充] player_index = -1 → 贴图走 posmod 落到 char_5.png")
+		neg.queue_free()
+
+	# ==================================================================
+	# [§4-13] 纯净化：world_map.gd 不碰场景树；两个文件都不调 Steam.；
+	#         两个文件都不出现惩罚性 token
+	# ==================================================================
+	var wm_src := _read_source(WORLD_MAP_SRC)
+	var pl_src := _read_source(PLAYER_SRC)
+	_fails += _check(not wm_src.is_empty(), "[§4-13] world_map.gd 可读")
+	_fails += _check(not pl_src.is_empty(), "[§4-13] player.gd 可读")
+	_fails += _check(not wm_src.contains("get_tree("),
+		"[§4-13] world_map.gd 不出现 get_tree(")
+	_fails += _check(not wm_src.contains("get_node("),
+		"[§4-13] world_map.gd 不出现 get_node(")
+	_fails += _check(not pl_src.contains("Steam."), "[§4-13] player.gd 不出现 Steam. 调用")
+	_fails += _check(not wm_src.contains("Steam."), "[§4-13] world_map.gd 不出现 Steam. 调用")
+	for token in PENALTY_TOKENS:
+		_fails += _check(not pl_src.contains(token),
+			"[§4-13] player.gd 不出现惩罚性 token「%s」" % token)
+		_fails += _check(not wm_src.contains(token),
+			"[§4-13] world_map.gd 不出现惩罚性 token「%s」" % token)
+	for token in PENALTY_WORD_TOKENS:
+		_fails += _check(not _has_word(pl_src, token),
+			"[§4-13] player.gd 不出现惩罚性 token「%s」（独立词）" % token)
+		_fails += _check(not _has_word(wm_src, token),
+			"[§4-13] world_map.gd 不出现惩罚性 token「%s」（独立词）" % token)
+	# 补充：本任务不得引用对局场景（那是 Task 11 的东西）
+	_fails += _check(not pl_src.contains("scenes/game.tscn"),
+		"[补充] player.gd 不引用 scenes/game.tscn")
+	_fails += _check(not wm_src.contains("scenes/game.tscn"),
+		"[补充] world_map.gd 不引用 scenes/game.tscn")
+
+	# ==================================================================
+	# [§4-14] load_map 对不存在的路径 / 非法 JSON 的返回必须自洽（不抛异常）
+	# ==================================================================
+	var missing := WorldMap.load_map("res://data/does_not_exist_map.json")
+	_fails += _check(missing.get("ok", false) == false,
+		"[§4-14] 不存在的路径 → ok == false")
+	_fails += _check(missing.get("size") == Vector2i.ZERO,
+		"[§4-14] 不存在的路径 → size 是零值（不是看起来正常的地图）")
+	_fails += _check((missing.get("props", {}) as Dictionary).is_empty(),
+		"[§4-14] 不存在的路径 → props 为空")
+	_fails += _check(str(missing.get("error", "")) != "",
+		"[§4-14] 不存在的路径 → 带有失败原因")
+
+	var bad_path := "user://after_hours_task8_invalid_map.json"
+	var bad_file := FileAccess.open(bad_path, FileAccess.WRITE)
+	if bad_file != null:
+		bad_file.store_string("{ 这不是合法 JSON ")
+		bad_file.close()
+		var bad := WorldMap.load_map(bad_path)
+		_fails += _check(bad.get("ok", false) == false,
+			"[§4-14] 非法 JSON → ok == false")
+		_fails += _check(bad.get("size") == Vector2i.ZERO,
+			"[§4-14] 非法 JSON → size 是零值")
+		_fails += _check((bad.get("props", {}) as Dictionary).is_empty(),
+			"[§4-14] 非法 JSON → props 为空")
+	else:
+		_fails += _check(false, "[§4-14] 能在 user:// 写出坏 JSON 样本")
+
+	# ------------------------------------------------------------------
+	# 收尾：释放实例
+	# ------------------------------------------------------------------
+	if owned != null:
+		owned.queue_free()
+	if player != null:
+		player.free()
+	await process_frame
+
+	print("")
+	print("断言总数: %d" % _total)
+	if _fails == 0:
+		print("TEST PASSED")
+		quit(0)
+	else:
+		print("TEST FAILED: %d 项" % _fails)
+		quit(1)
+
+
+## 读源码（纯文本）。
+func _read_source(path: String) -> String:
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return ""
+	return f.get_as_text()
+
+
+## 源码里有没有出现「作为一个独立词」的 token（**词边界匹配**）。
+## 正则编译失败时退回子串匹配（宁可多报，不可漏报）。
+func _has_word(src: String, token: String) -> bool:
+	var re := RegEx.new()
+	if re.compile("\\b%s\\b" % token) != OK:
+		return src.contains(token)
+	return re.search(src) != null
+
+
+## 违规列表的首条描述（用于失败诊断）。
+func _first(bad: Array) -> String:
+	if bad.is_empty():
+		return ""
+	return " —— 违规 %d 处，例如：%s" % [bad.size(), str(bad[0])]
+
+
+func _check(ok: bool, what: String) -> int:
+	_total += 1
+	print(("  [PASS] " if ok else "  [FAIL] ") + what)
+	return 0 if ok else 1
