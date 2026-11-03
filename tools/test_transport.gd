@@ -30,6 +30,10 @@ const LATCH_PORT := 27017
 const RETRY_PORT := 27018
 const NEW2_PORT := 27019
 const NEW3_PORT := 27020
+const SWAP_PORT := 27021
+const FAIL_PORT := 27022
+const HFAIL_PORT := 27023
+const SUPPRESS_PORT := 27024
 
 var _host: ENetTransport
 var _client: ENetTransport
@@ -75,6 +79,9 @@ var _retry_server_connected_count := 0
 var _retry_connection_failed_count := 0
 var _new3_server_connected_count := 0
 var _new3_connection_failed_count := 0
+var _swap_failure_count := 0
+var _fail_failure_count := 0
+var _suppress_forwarded_count := 0
 
 # 已经 close 过的 peer，避免二次 close 触发引擎 ERR_FAIL_COND
 var _closed_peers: Array[MultiplayerPeer] = []
@@ -458,8 +465,117 @@ func _boot() -> void:
 		"重新 attach 后新 mp 仍然转发 server_connected，实际 %d 次" % _new3_server_connected_count)
 
 	# ==================================================================
-	# 10. 收尾：关掉所有 peer，释放端口
+	# 10. 同一对象、同一端口二次 host()（NEW-4）
+	#     替换顺序保证「先关旧 peer 再 create_server」→ 同端口可以立刻重新绑定。
 	# ==================================================================
+	var swap_host := ENetTransport.new()
+	swap_host.connection_failed.connect(func(): _swap_failure_count += 1)
+	var e_swap := swap_host.host(SWAP_PORT, 4)
+	_fails += _check(e_swap == OK, "同端口重开房用例：第一次 host 成功")
+	var e_swap2 := swap_host.host(SWAP_PORT, 4)
+	_fails += _check(e_swap2 == OK, "同一对象同一端口二次 host 返回 OK（实际 %d）" % e_swap2)
+	_fails += _check(_swap_failure_count == 0,
+		"同一对象同一端口二次 host 不得发 connection_failed（实际 %d 次）" % _swap_failure_count)
+	_fails += _check(swap_host.is_host(), "二次 host 之后该对象仍然是房主")
+	_fails += _check(swap_host.get_peer_id() == 1, "二次 host 之后 peer id 仍然是 1（服务器）")
+	_fails += _check(swap_host.peer_list().is_empty(),
+		"二次 host 之后 peer_list() 正常（还没有客户端，实际 %s）" % str(swap_host.peer_list()))
+	# 端口仍被该对象占用：另一个对象抢同一个端口必须失败
+	var port_thief := ENetTransport.new()
+	Engine.print_error_messages = false
+	var e_thief := port_thief.host(SWAP_PORT, 4)
+	Engine.print_error_messages = true
+	_fails += _check(e_thief != OK,
+		"二次 host 之后端口仍被该对象占用（另一个对象抢同一端口失败，实际 %d）" % e_thief)
+
+	# ==================================================================
+	# 11. attached 模式下的失败路径：mp 里不留残留连接（NEW-5）
+	# ==================================================================
+	var fail_mp := MultiplayerAPI.create_default_interface()
+	var fail_client := ENetTransport.new()
+	fail_client.connection_failed.connect(func(): _fail_failure_count += 1)
+	var e_fc := fail_client.host(FAIL_PORT, 4)
+	_fails += _check(e_fc == OK, "attached 失败路径用例：host 成功")
+	fail_client.attach_to(fail_mp)
+	_fails += _check(fail_mp.multiplayer_peer == fail_client.get_peer(),
+		"attached 失败路径前置：attach 之后 mp 持有当前 peer")
+	Engine.print_error_messages = false
+	var e_fail := fail_client.join("不是一个服务器地址", FAIL_PORT)
+	Engine.print_error_messages = true
+	_fails += _check(e_fail != OK, "attached 失败路径：非法地址 join 返回非 OK（实际 %d）" % e_fail)
+	_fails += _check(fail_mp.multiplayer_peer == null,
+		"attached 失败路径：mp 不再持有本层放弃的 peer（实际 %s）" % str(fail_mp.multiplayer_peer))
+	_fails += _check(fail_client.get_peer() == null, "attached 失败路径：get_peer() == null")
+	_fails += _check(fail_client.get_peer_id() == 1, "attached 失败路径：get_peer_id() == 1")
+	_fails += _check(not fail_client.is_host(), "attached 失败路径：is_host() == false")
+	_fails += _check(fail_client.peer_list().is_empty(), "attached 失败路径：peer_list() 为空")
+	_fails += _check(_fail_failure_count == 1,
+		"attached 失败路径：connection_failed 恰好 1 次，实际 %d 次" % _fail_failure_count)
+	# mp 已经没有 peer 了，继续 poll 也不该报错（输出干净由外部检查把关）
+	for i in 10:
+		fail_mp.poll()
+		await process_frame
+	_fails += _check(_fail_failure_count == 1,
+		"attached 失败路径：mp 没有 peer 之后不再产生额外的 connection_failed（实际 %d 次）" % _fail_failure_count)
+
+	# ==================================================================
+	# 12. host() 失败路径的状态自洽（NEW-2 的补充）
+	#     先让这个对象成功建一个 server，再让它去抢一个被占用的端口。
+	# ==================================================================
+	var h3 := ENetTransport.new()
+	var e_h3 := h3.host(HFAIL_PORT, 4)
+	_fails += _check(e_h3 == OK, "host 失败路径用例：h3 占住端口 %d" % HFAIL_PORT)
+	var h4 := ENetTransport.new()
+	var e_h4_pre := h4.host(HFAIL_PORT + 1, 4)
+	_fails += _check(e_h4_pre == OK, "host 失败路径用例：h4 先在另一个端口成功建 server")
+	_fails += _check(h4.get_peer() != null, "host 失败路径前置：h4 失败前 get_peer() 非 null")
+	Engine.print_error_messages = false
+	var e_h4 := h4.host(HFAIL_PORT, 4)
+	var h4_peer := h4.get_peer()
+	var h4_id := h4.get_peer_id()
+	var h4_host := h4.is_host()
+	var h4_list := h4.peer_list()
+	Engine.print_error_messages = true
+	_fails += _check(e_h4 != OK, "host 失败路径：端口被占时返回非 OK 的 Error（实际 %d）" % e_h4)
+	_fails += _check(h4_peer == null, "host 失败路径：get_peer() == null")
+	_fails += _check(h4_id == 1, "host 失败路径：get_peer_id() == 1（约定的无 peer 值），实际 %d" % h4_id)
+	_fails += _check(not h4_host, "host 失败路径：is_host() == false")
+	_fails += _check(h4_list.is_empty(), "host 失败路径：peer_list() 为空，实际 %s" % str(h4_list))
+
+	# ==================================================================
+	# 13. 「替换进行中抑制事件」的白盒断言
+	#     替换窗口是同步的（host() / join() 内部一口气做完），外部无法在窗口里
+	#     注入事件，所以这里直接调用约定上的私有处理函数来验证抑制语义。
+	#     这条保证写在 transport.gd 的「peer 生命周期契约」里，必须有断言钉住。
+	# ==================================================================
+	var suppress_t := ENetTransport.new()
+	var e_sup := suppress_t.host(SUPPRESS_PORT, 4)
+	_fails += _check(e_sup == OK, "抑制用例：host 成功")
+	suppress_t.server_connected.connect(func(): _suppress_forwarded_count += 1)
+	suppress_t.connection_failed.connect(func(): _suppress_forwarded_count += 1)
+	suppress_t._begin_swap()
+	suppress_t._on_mp_connected_to_server()
+	suppress_t._on_mp_connection_failed()
+	suppress_t._on_mp_server_disconnected()
+	suppress_t._on_peer_connected(4242)
+	_fails += _check(_suppress_forwarded_count == 0,
+		"替换进行中：mp / peer 上报的连接事件一律不转发（实际 %d 次）" % _suppress_forwarded_count)
+	_fails += _check(suppress_t.peer_list().is_empty(),
+		"替换进行中：已知 peer 集合不被污染（实际 %s）" % str(suppress_t.peer_list()))
+	suppress_t._end_swap()
+	suppress_t._on_mp_connected_to_server()
+	_fails += _check(_suppress_forwarded_count == 1,
+		"退出替换后：连接事件恢复正常转发（实际 %d 次）" % _suppress_forwarded_count)
+
+	# ==================================================================
+	# 14. 收尾：关掉所有 peer，释放端口
+	# ==================================================================
+	_close_peer(suppress_t.get_peer())
+	_close_peer(swap_host.get_peer())
+	_close_peer(h3.get_peer())
+	_close_peer(h4.get_peer())
+	_close_peer(port_thief.get_peer())
+	_close_peer(fail_client.get_peer())
 	_close_peer(_retry_client.get_peer())
 	_close_peer(_retry_host.get_peer())
 	_close_peer(_new2_host.get_peer())
