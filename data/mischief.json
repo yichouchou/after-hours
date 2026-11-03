@@ -1,0 +1,12 @@
+[
+  {"id":"steal_carrot","title":"偷走杂货铺的萝卜","category":"steal","target_tag":"carrot","needs_partner":false,"duration":1.5,"points":10},
+  {"id":"steal_hat","title":"偷走镇长的帽子","category":"steal","target_tag":"hat","needs_partner":false,"duration":1.5,"points":10},
+  {"id":"steal_basket","title":"偷走酒馆的篮子","category":"steal","target_tag":"basket","needs_partner":false,"duration":1.5,"points":10},
+  {"id":"mess_chairs","title":"把广场椅子堆成塔","category":"mess","target_tag":"chair","needs_partner":true,"duration":3.0,"points":15},
+  {"id":"mess_barrel","title":"打翻广场的木桶","category":"mess","target_tag":"barrel","needs_partner":false,"duration":1.0,"points":10},
+  {"id":"mess_lamps","title":"拔掉街上的路灯","category":"mess","target_tag":"lamp","needs_partner":false,"duration":2.0,"points":15},
+  {"id":"prank_bench","title":"把长椅搬到池塘边看日落","category":"prank","target_tag":"bench","needs_partner":true,"duration":3.0,"points":15},
+  {"id":"prank_pot","title":"给花盆穿上外套","category":"prank","target_tag":"pot","needs_partner":false,"duration":2.0,"points":10},
+  {"id":"decor_sign","title":"把告示牌倒过来","category":"decor","target_tag":"sign","needs_partner":false,"duration":1.0,"points":10},
+  {"id":"noise_pot","title":"敲响酒馆的锅","category":"noise","target_tag":"pot","needs_partner":false,"duration":0.5,"points":15}
+]
