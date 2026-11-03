@@ -7,6 +7,11 @@ const LOBBY_SCENE := "res://scenes/lobby.tscn"
 
 
 func goto(scene_path: String) -> void:
+	# 目标场景不存在时明确跳过，而不是让 change_scene_to_file 静默失败、
+	# 留下一堆 "Cannot open file" 错误。对所有调用点生效。
+	if not ResourceLoader.exists(scene_path):
+		print("[Router] 场景不存在，已跳过: ", scene_path)
+		return
 	get_tree().change_scene_to_file(scene_path)
 
 
