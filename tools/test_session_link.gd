@@ -19,7 +19,8 @@ extends SceneTree
 ## 走真实的 rpc_id 投递 + 真实的跨进程序列化。
 ##   * 子脚本：res://tools/session_link_child.gd（**故意不叫 test_*.gd**，
 ##     否则会被统一入口当成独立测试单独跑）
-##   * 子进程用 OS.get_cmdline_user_args() 读 `--` 之后的 mode / port
+##   * 子进程用 OS.get_cmdline_user_args() 读 `--` 之后的
+##     mode / base / span / 交接文件路径（修复轮 3 的新契约）
 ##   * 子进程有自己的兜底退出（--quit-after + 显式 quit(0)）
 ##   * 子进程的输出被**捕获**（不是继承），父进程的 stdout/stderr 保持干净
 ##
@@ -31,7 +32,19 @@ extends SceneTree
 ##   房主 10 秒回报 / 14 秒退出，客户端 10.5 秒回报并退出。
 ##   两个进程都在「链路还活着」的时候回报，父进程才能断言两端状态。
 ##
-## 【端口】27040（避开 Task 6 的 27015-27024 与 Task 7 单进程测试的 27030-27033）。
+## 【端口：运行时动态分配】（修复轮 3 / F3）
+## 固定端口 = 隐含「全局只有我一个人跑」的假设，而 SDD 流程里
+## 「控制器跑统一入口」与「复审子代理跑测试」是**必然并发**的
+## → 固定端口必然被抢 → 产生**假失败**（实测：端口 27040 被占 →
+## 12 条断言连锁失败、退出码 1；端口一释放立刻恢复全绿）。
+## → 端口从 res://tools/port_alloc.gd 的候选池（27100 起、跨 200 个）里取，
+##   并且**由真实的服务端 socket 裁决**（绑定成功才算可用，失败就换下一个）。
+##
+## 【★ 交接文件（handoff file）替代魔法延迟】
+## 房主在**子进程**里，父进程必须在**启动客户端之前**知道房主实际占的是哪个端口。
+## 原来的做法是 `OS.delay_msec(1500)` —— 既慢又不可靠。
+## → 房主**绑定成功之后**立刻把端口号写进交接文件；父进程**轮询**这个文件。
+##   「文件存在」⟺「端口已被占住」→ 客户端**一定**能连上房主。
 ##
 ## 【断言的 4 件事】
 ##   ① 客户端收到了房主名单 → 两边 peer_count 一致且 == 2
@@ -40,9 +53,7 @@ extends SceneTree
 ##   ③ 房主**超过 8 秒之后仍然健在**（直接锁死 C3）
 ##   ④ 客户端收到的**只有自己那一份**清单（不泄漏别人的）
 
-const HOST_PORT := 27040
-## 噪声探针子进程用的端口（**不碰网络**，只是让参数形状与另外两个子进程一致）。
-const NOISE_PORT := 27041
+const PortAlloc := preload("res://tools/port_alloc.gd")
 const CHILD_SCRIPT := "res://tools/session_link_child.gd"
 ## 子进程的兜底退出帧数。
 ## **注意**：headless 实测 ~146 fps（不是 60），所以「N 帧」远小于「N/60 秒」：
@@ -54,6 +65,11 @@ const CONNECT_TIMEOUT_SEC := 8
 ## 房主子进程比客户端多活多少毫秒（房主必须 outlive 客户端，见文件头）。
 const HOST_LIFE_MS := 14000
 const CLIENT_LIFE_MS := 10500
+## 房主子进程最多试多少个候选端口（父进程给一个**落在候选池内**的线性窗口）。
+const HOST_CANDIDATES := 8
+## 交接文件轮询：间隔（毫秒）与上限（毫秒）。
+const HANDOFF_POLL_MS := 25
+const HANDOFF_TIMEOUT_MS := 15000
 
 var _fails := 0
 var _total := 0
@@ -67,17 +83,37 @@ func _boot() -> void:
 	var exe := OS.get_executable_path()
 	var proj := ProjectSettings.globalize_path("res://")
 
+	# --- 交接文件：名字必须**唯一** → 两个并发跑的 link 测试不会互相读对方的交接文件 ---
+	var handoff := "user://session_link_handoff_%s.txt" % _rand_hex()
+	_fails += _check(not FileAccess.file_exists(handoff),
+		"交接文件在开跑前不存在（不会读到上一次运行的残留）：%s" % handoff)
+
 	# --- 房主子进程：放到后台线程里跑（必须与客户端**并发**）---
-	var host_args := _child_args(proj, "host", HOST_PORT)
+	# 候选窗口：起点随机、整体落在候选池内（父进程给子进程一个**确定性**的线性序列）。
+	var win := PortAlloc.window(HOST_CANDIDATES)
+	var base_port: int = win[0]
+	var span: int = win.size()
+	var host_args := _child_args(proj, "host", base_port, span, handoff)
 	var host_out: Array = []
 	var th := Thread.new()
 	th.start(func() -> void: OS.execute(exe, host_args, host_out, true))
 
-	# 等房主把端口占上（否则客户端会连不上）
-	OS.delay_msec(1500)
+	# --- 等房主把端口占上：轮询**交接文件**（**不再用 OS.delay_msec(1500) 魔法延迟**）---
+	var host_port := -1
+	var deadline := Time.get_ticks_msec() + HANDOFF_TIMEOUT_MS
+	while Time.get_ticks_msec() < deadline:
+		host_port = read_handoff_port(handoff)
+		if host_port > 0:
+			break
+		if not th.is_alive():
+			# 房主线程已经结束，但交接文件还没出现 → **立即判失败**（不要干等满 15 秒）。
+			break
+		OS.delay_msec(HANDOFF_POLL_MS)
+	_fails += _check(host_port > 0,
+		"从交接文件拿到了房主实际占用的端口（实际 %d）" % host_port)
 
 	# --- 客户端子进程：前台阻塞跑 ---
-	var client_args := _child_args(proj, "client", HOST_PORT)
+	var client_args := _child_args(proj, "client", host_port, 1, "-")
 	var client_out: Array = []
 	var client_code := OS.execute(exe, client_args, client_out, true)
 
@@ -86,6 +122,16 @@ func _boot() -> void:
 
 	var host := _parse(host_out)
 	var client := _parse(client_out)
+
+	# ★ 交叉核对：交接文件里的端口 == 房主回报的 LINK|host_port（防交接文件写错）。
+	_fails += _check(handoff_matches(host_port, int(host.get("host_port", "-1"))),
+		"交接文件里的端口与房主回报的 LINK|host_port 一致（交接 %d / 回报 %s）"
+		% [host_port, str(host.get("host_port", ""))])
+
+	# 把房主实际占用的端口回报到本测试的 stdout：
+	# 并发回归测试（tools/test_port_alloc.gd 的 A5）要**并发跑两份**本测试，
+	# 再从两份输出里各取一个房主端口，断言它们**不同**。
+	print("LINK|host_port=%d" % host_port)
 
 	_fails += _check(host.has("DONE"), "房主子进程正常跑完并回报")
 	_fails += _check(client.has("DONE"), "客户端子进程正常跑完并回报")
@@ -188,7 +234,8 @@ func _boot() -> void:
 	# 修复轮 1 时子进程用 `Engine.print_error_messages = false` 压掉了引擎日志，
 	# 于是上面那两条断言**恒为 true**（虚假覆盖）。修复轮 2 恢复了引擎输出，
 	# 并用第三个子进程（噪声探针）证明：真出现 ERROR/WARNING 时，它**确实会失败**。
-	var noise_args := _child_args(proj, "host", NOISE_PORT, "noise")
+	# 噪声探针：**不碰网络**（mode = "noise"），只是让参数形状与另外两个子进程一致。
+	var noise_args := _child_args(proj, "noise", 0, 1, "-")
 	var noise_out: Array = []
 	var noise_code := OS.execute(exe, noise_args, noise_out, true)
 	_fails += _check(noise_code == 0,
@@ -197,6 +244,11 @@ func _boot() -> void:
 		"噪声探针子进程确实打出了 ERROR / WARNING 行（反向自检的前提）")
 	_fails += _check(not _no_engine_noise(noise_out),
 		"反向自检：噪声探针让「零 ERROR/WARNING」断言确实判失败（该断言有检测力，不是恒真）")
+
+	# 收尾：删掉**自己刚创建的那一个**交接文件。
+	#   路径是自己生成的唯一名字 → 转成绝对路径后精确删除，
+	#   **不用通配符、不删其它路径**。
+	_remove_own_handoff(handoff)
 
 	print("")
 	print("断言总数：%d" % _total)
@@ -217,19 +269,80 @@ func _boot() -> void:
 		quit(1)
 
 
-## 子进程的启动参数。
-## `flag` 非空时追加为**第三个** user arg（噪声探针用）。
-func _child_args(proj: String, mode: String, port: int, flag: String = "") -> PackedStringArray:
-	var args := PackedStringArray([
+## 子进程的启动参数（新契约）。
+##     -- <mode> <base> <span> <handoff_path> [noise]
+##   mode = "host" | "client" | "noise" | "portprobe"
+##   base = 候选起始端口（host/portprobe）或具体端口（client）或 0（noise）
+##   span = 候选个数（host/portprobe）或 1（client/noise）
+##   handoff_path = 交接文件路径（host）或 "-"
+func _child_args(proj: String, mode: String, base: int, span: int, handoff: String) -> PackedStringArray:
+	return PackedStringArray([
 		"--headless",
 		"--path", proj,
 		"--quit-after", CHILD_QUIT_AFTER,
 		"--script", CHILD_SCRIPT,
-		"--", mode, str(port),
+		"--", mode, str(base), str(span), handoff,
 	])
-	if flag != "":
-		args.append(flag)
-	return args
+
+
+## 随机十六进制串（用来生成**唯一**的交接文件名）。
+func _rand_hex() -> String:
+	return "%08x%08x%08x" % [randi(), randi(), randi()]
+
+
+## ------------------------------------------------------------------
+## 【交接文件读写】
+## ------------------------------------------------------------------
+## ★ 这两个函数是**静态**的：tools/test_port_alloc.gd 的 A4 直接测它们 ——
+##   测的是**真正被 link 测试使用的那一份实现**，不是复制品。
+##
+## 读交接文件里的端口号。
+##
+## ★ **失败必须明确**：路径为空 / 文件不存在 / 打不开 / 内容不是合法整数
+##   → 返回 -1。
+##   绝不能「静默当成 0 端口」（那会让父进程去连别人的服务器）
+##   也不能「当作成功」。
+static func read_handoff_port(path: String) -> int:
+	if path == "" or path == "-":
+		return -1
+	if not FileAccess.file_exists(path):
+		return -1
+	var f := FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return -1
+	var txt := f.get_as_text().strip_edges()
+	f.close()
+	# 端口号最多 5 位；用长度上限挡住溢出
+	# （String.is_valid_int() **不防溢出**：对超长数字串它返回 true，
+	#   但 int() 会溢出并打一条引擎 ERROR）。
+	if txt.length() < 1 or txt.length() > 5:
+		return -1
+	if not txt.is_valid_int():
+		return -1
+	var p := txt.to_int()
+	if p <= 0 or p > 65535:
+		return -1
+	return p
+
+
+## 交接文件里的端口 == 子进程回报的端口？（交叉核对，防交接文件写错）
+static func handoff_matches(handoff_port: int, reported_port: int) -> bool:
+	return handoff_port > 0 and handoff_port == reported_port
+
+
+## 删掉**自己刚创建的那一个**交接文件。
+##
+## ★ 路径是自己生成的唯一名字 → 转成绝对路径后**精确**删除，
+##   **不用通配符、不删其它路径**。
+func _remove_own_handoff(path: String) -> void:
+	if path == "" or path == "-":
+		return
+	var abs_path := ProjectSettings.globalize_path(path)
+	if not FileAccess.file_exists(abs_path):
+		return
+	var err := DirAccess.remove_absolute(abs_path)
+	if err != OK:
+		push_warning("[link] 交接文件删不掉：%s（err=%d）" % [abs_path, err])
 
 
 ## 解析子进程输出里的 `LINK|key=value` 行。

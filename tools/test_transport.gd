@@ -19,21 +19,29 @@ extends SceneTree
 ## 所以这里改成「host 看到的那唯一一个 peer == client 自己的 peer id」，
 ## 并额外断言 peer_connected 信号带的就是同一个 id——语义没有被削弱，反而更强。
 ##
-## 端口：27015（主握手）/ 27016（attach_to 用）/ 27017（闩锁用例），收尾全部 close() 释放。
+## ------------------------------------------------------------------
+## 【端口：运行时动态分配】（修复轮 3 / F3）
+## ------------------------------------------------------------------
+## 固定端口 = 隐含「全局只有我一个人跑」的假设。而 SDD 流程里
+## 「控制器跑统一入口」与「复审子代理跑测试」是**必然并发**的
+## → 这个假设必然被打破 → 固定端口必然被抢 → 产生**假失败**。
+## → 端口从 res://tools/port_alloc.gd 的候选池（27100 起、跨 200 个）里取，
+##   并且**由真实的服务端 socket 裁决**：绑定成功才算这个端口可用，
+##   绑定失败就换下一个候选（见 _bind_on）。
 ##
 ## 注意：预期失败的调用（二次 host、非法地址 join）会触发引擎自身的 ERROR 日志，
 ## 包裹在 Engine.print_error_messages = false 里，保证测试输出干净。
 
-const HOST_PORT := 27015
-const ATTACH_PORT := 27016
-const LATCH_PORT := 27017
-const RETRY_PORT := 27018
-const NEW2_PORT := 27019
-const NEW3_PORT := 27020
-const SWAP_PORT := 27021
-const FAIL_PORT := 27022
-const HFAIL_PORT := 27023
-const SUPPRESS_PORT := 27024
+const PortAlloc := preload("res://tools/port_alloc.gd")
+
+## 端口候选池的游标（同一个进程内绝不重复给出同一个候选）。
+var _alloc := PortAlloc.new()
+
+## 「候选端口被别人占着 → 换下一个」的次数（诊断用；正常应为 0）。
+var _bind_retries := 0
+
+## 本轮实际用掉的端口（用来断言它们互不相同）。
+var _used_ports: Array[int] = []
 
 var _host: ENetTransport
 var _client: ENetTransport
@@ -106,12 +114,17 @@ func _boot() -> void:
 	# 2. host 创建
 	# ==================================================================
 	_host = ENetTransport.new()
+	# ★ **先绑定、再连信号**：绑定失败会发 connection_failed()，
+	#   那是「端口搜索」过程中的噪声，不是被测行为
+	#   （信号计数断言从绑定成功之后才开始算）。
+	var r_host := _bind_on(_host)
+	var host_port: int = int(r_host["port"])
+	var e: Error = r_host["err"]
 	_host.peer_connected.connect(func(id): _host_connected_ids.append(id))
 	_host.peer_disconnected.connect(func(id): _host_disconnected_ids.append(id))
 	_host.server_connected.connect(func(): _host_server_connected_count += 1)
 	_host.connection_failed.connect(func(): _host_connection_failed_count += 1)
 
-	var e := _host.host(HOST_PORT, 4)
 	_fails += _check(e == OK, "host 创建成功")
 	_fails += _check(_host.is_host(), "host.is_host() 为 true")
 	_fails += _check(_host.get_peer_id() == 1, "host peer id 为 1")
@@ -123,7 +136,7 @@ func _boot() -> void:
 	second.connection_failed.connect(func(): _double_host_connection_failed_count += 1)
 	# 预期失败：压掉引擎自身的 ERROR 日志，保持测试输出干净。
 	Engine.print_error_messages = false
-	var e_second := second.host(HOST_PORT, 4)
+	var e_second := second.host(host_port, 4)
 	Engine.print_error_messages = true
 	_fails += _check(e_second != OK, "同一端口二次 host 返回非 OK 的 Error（实际 %d）" % e_second)
 	_fails += _check(_double_host_connection_failed_count == 1,
@@ -141,7 +154,7 @@ func _boot() -> void:
 	_client.server_connected.connect(func(): _client_server_connected_count += 1)
 	_client.connection_failed.connect(func(): _client_connection_failed_count += 1)
 
-	var e2 := _client.join("127.0.0.1", HOST_PORT)
+	var e2 := _client.join("127.0.0.1", host_port)
 	_fails += _check(e2 == OK, "client 连接请求发出")
 	_fails += _check(not _client.is_host(), "client.is_host() 为 false")
 	_fails += _check(_client.get_peer_id() != 1, "client 的 peer id 不是 1（不是服务器），实际 %d" % _client.get_peer_id())
@@ -214,17 +227,19 @@ func _boot() -> void:
 	# ==================================================================
 	var mp := MultiplayerAPI.create_default_interface()
 	_attach_host = ENetTransport.new()
+	var r_ah := _bind_on(_attach_host)
+	var attach_port: int = int(r_ah["port"])
+	var e_ah: Error = r_ah["err"]
 	_attach_host.peer_connected.connect(func(id): _attach_host_connected_ids.append(id))
 	_attach_host.server_connected.connect(func(): _attach_host_server_connected_count += 1)
 	_attach_host.connection_failed.connect(func(): _attach_host_connection_failed_count += 1)
-	var e_ah := _attach_host.host(ATTACH_PORT, 4)
 	_fails += _check(e_ah == OK, "attach 用例的 host 创建成功")
 
 	_attach_client = ENetTransport.new()
 	_attach_client.peer_connected.connect(func(id): _attach_client_connected_ids.append(id))
 	_attach_client.server_connected.connect(func(): _attach_client_server_connected_count += 1)
 	_attach_client.connection_failed.connect(func(): _attach_client_connection_failed_count += 1)
-	var e_ac := _attach_client.join("127.0.0.1", ATTACH_PORT)
+	var e_ac := _attach_client.join("127.0.0.1", attach_port)
 	_fails += _check(e_ac == OK, "attach 用例的 client 连接请求发出")
 
 	_attach_client.attach_to(mp)
@@ -313,8 +328,8 @@ func _boot() -> void:
 	var retry := ENetTransport.new()
 	retry.connection_failed.connect(func(): _retry_failure_count += 1)
 	Engine.print_error_messages = false
-	var re1 := retry.join("不是一个服务器地址", HOST_PORT)
-	var re2 := retry.join("不是一个服务器地址", HOST_PORT)
+	var re1 := retry.join("不是一个服务器地址", host_port)
+	var re2 := retry.join("不是一个服务器地址", host_port)
 	Engine.print_error_messages = true
 	_fails += _check(re1 != OK, "第一次非法地址 join 返回非 OK 的 Error（实际 %d）" % re1)
 	_fails += _check(re2 != OK, "第二次非法地址 join 返回非 OK 的 Error（实际 %d）" % re2)
@@ -323,14 +338,16 @@ func _boot() -> void:
 
 	# (b) 同一对象：join 成功 → 掉线 → 再 join 成功 → server_connected 发 2 次。
 	_latch_server = ENetTransport.new()
-	var e_ls := _latch_server.host(LATCH_PORT, 4)
+	var r_ls := _bind_on(_latch_server)
+	var latch_port: int = int(r_ls["port"])
+	var e_ls: Error = r_ls["err"]
 	_fails += _check(e_ls == OK, "闩锁用例的 host 创建成功")
 
 	_latch_client = ENetTransport.new()
 	_latch_client.server_connected.connect(func(): _latch_server_connected_count += 1)
 	_latch_client.connection_failed.connect(func(): _latch_failure_count += 1)
 
-	var j1 := _latch_client.join("127.0.0.1", LATCH_PORT)
+	var j1 := _latch_client.join("127.0.0.1", latch_port)
 	_fails += _check(j1 == OK, "闩锁用例第一次 join 成功")
 	for i in 120:
 		_latch_server.poll()
@@ -349,7 +366,7 @@ func _boot() -> void:
 		"掉线后 connection_failed 发 1 次，实际 %d 次" % _latch_failure_count)
 
 	# 同一个对象再 join 一次 → 闩锁复位 → server_connected 应该再发一次。
-	var j2 := _latch_client.join("127.0.0.1", LATCH_PORT)
+	var j2 := _latch_client.join("127.0.0.1", latch_port)
 	_fails += _check(j2 == OK, "闩锁用例第二次 join 成功")
 	for i in 120:
 		_latch_server.poll()
@@ -367,14 +384,16 @@ func _boot() -> void:
 	# ==================================================================
 	var retry_mp := MultiplayerAPI.create_default_interface()
 	_retry_host = ENetTransport.new()
-	var e_rh := _retry_host.host(RETRY_PORT, 4)
+	var r_rh := _bind_on(_retry_host)
+	var retry_port: int = int(r_rh["port"])
+	var e_rh: Error = r_rh["err"]
 	_fails += _check(e_rh == OK, "重试用例的 host 创建成功")
 
 	_retry_client = ENetTransport.new()
 	_retry_client.peer_connected.connect(func(id): _retry_connected_ids.append(id))
 	_retry_client.server_connected.connect(func(): _retry_server_connected_count += 1)
 	_retry_client.connection_failed.connect(func(): _retry_connection_failed_count += 1)
-	var e_rj := _retry_client.join("127.0.0.1", RETRY_PORT)
+	var e_rj := _retry_client.join("127.0.0.1", retry_port)
 	_fails += _check(e_rj == OK, "重试用例第一次 join 成功")
 	_retry_client.attach_to(retry_mp)
 	_fails += _check(retry_mp.multiplayer_peer == _retry_client.get_peer(),
@@ -390,7 +409,7 @@ func _boot() -> void:
 		"重试用例第一次连接成功，server_connected 发 1 次，实际 %d 次" % _retry_server_connected_count)
 
 	# 同一个对象重新 join()：mp 必须换绑到新 peer，新 peer 才能被驱动。
-	var e_rejoin := _retry_client.join("127.0.0.1", RETRY_PORT)
+	var e_rejoin := _retry_client.join("127.0.0.1", retry_port)
 	_fails += _check(e_rejoin == OK, "attached 模式重新 join 返回 OK")
 	for i in 120:
 		_retry_host.poll()
@@ -415,13 +434,15 @@ func _boot() -> void:
 	#    （否则 get_peer_id() 会返回 0，既不是合法 peer id 也不是约定的 1）。
 	# ==================================================================
 	_new2_host = ENetTransport.new()
-	var e_n2 := _new2_host.host(NEW2_PORT, 4)
+	var r_n2 := _bind_on(_new2_host)
+	var new2_port: int = int(r_n2["port"])
+	var e_n2: Error = r_n2["err"]
 	_fails += _check(e_n2 == OK, "失败路径用例的 host 创建成功")
 	_fails += _check(_new2_host.get_peer() != null, "失败路径用例：host 成功时 get_peer() 非 null")
 
 	# 预期失败：压掉引擎自身的 ERROR 日志，保持测试输出干净。
 	Engine.print_error_messages = false
-	var e_bad := _new2_host.join("不是一个服务器地址", NEW2_PORT)
+	var e_bad := _new2_host.join("不是一个服务器地址", new2_port)
 	Engine.print_error_messages = true
 	_fails += _check(e_bad != OK, "失败路径用例：非法地址 join 返回非 OK 的 Error（实际 %d）" % e_bad)
 	# 这三个调用如果落在已被关掉的旧 peer 上，引擎会打 ERROR；
@@ -446,7 +467,9 @@ func _boot() -> void:
 	var mp_a := MultiplayerAPI.create_default_interface()
 	var mp_b := MultiplayerAPI.create_default_interface()
 	_new3_host = ENetTransport.new()
-	var e_n3 := _new3_host.host(NEW3_PORT, 4)
+	var r_n3 := _bind_on(_new3_host)
+	var new3_port: int = int(r_n3["port"])
+	var e_n3: Error = r_n3["err"]
 	_fails += _check(e_n3 == OK, "重新 attach 用例的 host 创建成功")
 	_new3_host.server_connected.connect(func(): _new3_server_connected_count += 1)
 	_new3_host.connection_failed.connect(func(): _new3_connection_failed_count += 1)
@@ -469,10 +492,12 @@ func _boot() -> void:
 	#     替换顺序保证「先关旧 peer 再 create_server」→ 同端口可以立刻重新绑定。
 	# ==================================================================
 	var swap_host := ENetTransport.new()
+	var r_swap := _bind_on(swap_host)
+	var swap_port: int = int(r_swap["port"])
+	var e_swap: Error = r_swap["err"]
 	swap_host.connection_failed.connect(func(): _swap_failure_count += 1)
-	var e_swap := swap_host.host(SWAP_PORT, 4)
 	_fails += _check(e_swap == OK, "同端口重开房用例：第一次 host 成功")
-	var e_swap2 := swap_host.host(SWAP_PORT, 4)
+	var e_swap2 := swap_host.host(swap_port, 4)
 	_fails += _check(e_swap2 == OK, "同一对象同一端口二次 host 返回 OK（实际 %d）" % e_swap2)
 	_fails += _check(_swap_failure_count == 0,
 		"同一对象同一端口二次 host 不得发 connection_failed（实际 %d 次）" % _swap_failure_count)
@@ -483,7 +508,7 @@ func _boot() -> void:
 	# 端口仍被该对象占用：另一个对象抢同一个端口必须失败
 	var port_thief := ENetTransport.new()
 	Engine.print_error_messages = false
-	var e_thief := port_thief.host(SWAP_PORT, 4)
+	var e_thief := port_thief.host(swap_port, 4)
 	Engine.print_error_messages = true
 	_fails += _check(e_thief != OK,
 		"二次 host 之后端口仍被该对象占用（另一个对象抢同一端口失败，实际 %d）" % e_thief)
@@ -493,14 +518,16 @@ func _boot() -> void:
 	# ==================================================================
 	var fail_mp := MultiplayerAPI.create_default_interface()
 	var fail_client := ENetTransport.new()
+	var r_fc := _bind_on(fail_client)
+	var fail_port: int = int(r_fc["port"])
+	var e_fc: Error = r_fc["err"]
 	fail_client.connection_failed.connect(func(): _fail_failure_count += 1)
-	var e_fc := fail_client.host(FAIL_PORT, 4)
 	_fails += _check(e_fc == OK, "attached 失败路径用例：host 成功")
 	fail_client.attach_to(fail_mp)
 	_fails += _check(fail_mp.multiplayer_peer == fail_client.get_peer(),
 		"attached 失败路径前置：attach 之后 mp 持有当前 peer")
 	Engine.print_error_messages = false
-	var e_fail := fail_client.join("不是一个服务器地址", FAIL_PORT)
+	var e_fail := fail_client.join("不是一个服务器地址", fail_port)
 	Engine.print_error_messages = true
 	_fails += _check(e_fail != OK, "attached 失败路径：非法地址 join 返回非 OK（实际 %d）" % e_fail)
 	_fails += _check(fail_mp.multiplayer_peer == null,
@@ -523,14 +550,20 @@ func _boot() -> void:
 	#     先让这个对象成功建一个 server，再让它去抢一个被占用的端口。
 	# ==================================================================
 	var h3 := ENetTransport.new()
-	var e_h3 := h3.host(HFAIL_PORT, 4)
-	_fails += _check(e_h3 == OK, "host 失败路径用例：h3 占住端口 %d" % HFAIL_PORT)
+	var r_h3 := _bind_on(h3)
+	var hfail_port: int = int(r_h3["port"])
+	var e_h3: Error = r_h3["err"]
+	_fails += _check(e_h3 == OK, "host 失败路径用例：h3 占住端口 %d" % hfail_port)
 	var h4 := ENetTransport.new()
-	var e_h4_pre := h4.host(HFAIL_PORT + 1, 4)
+	var r_h4pre := _bind_on(h4)
+	var hfail_pre_port: int = int(r_h4pre["port"])
+	var e_h4_pre: Error = r_h4pre["err"]
 	_fails += _check(e_h4_pre == OK, "host 失败路径用例：h4 先在另一个端口成功建 server")
+	_fails += _check(hfail_pre_port != hfail_port,
+		"h4 的预占端口与 h3 占住的端口不是同一个（修复轮 3：动态分配后不再是隐式相邻）")
 	_fails += _check(h4.get_peer() != null, "host 失败路径前置：h4 失败前 get_peer() 非 null")
 	Engine.print_error_messages = false
-	var e_h4 := h4.host(HFAIL_PORT, 4)
+	var e_h4 := h4.host(hfail_port, 4)
 	var h4_peer := h4.get_peer()
 	var h4_id := h4.get_peer_id()
 	var h4_host := h4.is_host()
@@ -549,8 +582,12 @@ func _boot() -> void:
 	#     这条保证写在 transport.gd 的「peer 生命周期契约」里，必须有断言钉住。
 	# ==================================================================
 	var suppress_t := ENetTransport.new()
-	var e_sup := suppress_t.host(SUPPRESS_PORT, 4)
+	var r_sup := _bind_on(suppress_t)
+	var suppress_port: int = int(r_sup["port"])
+	var e_sup: Error = r_sup["err"]
 	_fails += _check(e_sup == OK, "抑制用例：host 成功")
+	_fails += _check(suppress_port != hfail_port and suppress_port != hfail_pre_port,
+		"抑制用例的端口与 host 失败路径用例的两个端口都不同（不再有隐式的端口碰撞）")
 	suppress_t.server_connected.connect(func(): _suppress_forwarded_count += 1)
 	suppress_t.connection_failed.connect(func(): _suppress_forwarded_count += 1)
 	suppress_t._begin_swap()
@@ -586,6 +623,16 @@ func _boot() -> void:
 	_close_peer(_latch_server.get_peer())
 	_close_peer(_host.get_peer())
 
+	# 本轮动态分配的端口必须**互不相同**（否则「同端口二次 host 必须失败」那条用例
+	# 就可能因为别的用例先占了端口而变成假失败）。
+	var uniq: Array[int] = []
+	for p in _used_ports:
+		if not uniq.has(p):
+			uniq.append(p)
+	_fails += _check(uniq.size() == _used_ports.size(),
+		"本轮动态分配的 %d 个端口互不相同（去重后 %d 个）"
+		% [_used_ports.size(), uniq.size()])
+
 	print("")
 	print("断言总数：%d" % _total)
 	if _fails == 0:
@@ -594,6 +641,41 @@ func _boot() -> void:
 	else:
 		print("TEST FAILED: %d 项" % _fails)
 		quit(1)
+
+
+## ------------------------------------------------------------------
+## 【真实绑定裁决】（修复轮 3 / F3 的核心）
+## ------------------------------------------------------------------
+## 拿候选 → **真的 host()** → 绑定失败就换下一个候选。
+##
+## ★ **这里不做探测**：用一个探测 socket bind() 一下端口、成功就认为可用、
+##   close 掉探测 socket —— 那是**错的**：探测与真实绑定之间有**竞态窗口**，
+##   两个并发进程可能**同时**探测到同一个端口、都以为它是空的，
+##   然后其中一个真实绑定失败 → 测试失败
+##   （那只是把「固定端口冲突」换成了「概率性冲突」）。
+##   → 端口的裁决权归**真实的服务端 socket**：绑定成功才算这个端口可用。
+##
+## ★ 候选用尽 → 明确失败（port = -1），**严禁**静默回退到任何固定端口。
+##
+## ★ 调用方必须在**绑定成功之后**再连信号：绑定失败会发 connection_failed()，
+##   那是「端口搜索」过程中的噪声，不是被测行为。
+func _bind_on(t: ENetTransport) -> Dictionary:
+	var attempts := 0
+	while not _alloc.exhausted():
+		var p: int = _alloc.next()
+		if p < 0:
+			break
+		attempts += 1
+		# 预期失败：引擎自己会打一条 ERROR（"Couldn't create an ENet host"）→ 压掉，保持输出干净。
+		Engine.print_error_messages = false
+		var e: Error = t.host(p, 4)
+		Engine.print_error_messages = true
+		if e == OK:
+			_used_ports.append(p)
+			return {"port": p, "err": e, "attempts": attempts}
+		# 绑定失败 → 这个端口被别人占着 → 换下一个候选。
+		_bind_retries += 1
+	return {"port": -1, "err": ERR_CANT_CREATE, "attempts": attempts}
 
 
 ## close 一个 peer，并记账，避免二次 close 触发引擎 ERR_FAIL_COND 报错。

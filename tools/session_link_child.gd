@@ -2,11 +2,34 @@ extends SceneTree
 
 ## Task 7 修复轮 1：**双进程真实 RPC 测试**的子进程。
 ##
-## 由父进程 tools/test_session_link.gd 用 OS.execute 拉起：
+## 由父进程 tools/test_session_link.gd 用 OS.execute 拉起（修复轮 3 之后的新契约）：
 ##     <godot> --headless --path <proj> --quit-after 20000 \
-##             --script res://tools/session_link_child.gd -- <mode> <port>
-##   mode = "host" | "client"
-##   端口 = 27040（避开 Task 6 的 27015-27024 与 Task 7 单进程测试的 27030-27033）
+##             --script res://tools/session_link_child.gd \
+##             -- <mode> <base> <span> <handoff_path> [noise]
+##
+## | 位置          | 含义 |
+## |---------------|------|
+## | mode          | "host" / "client" / "noise" / "portprobe" |
+## | base          | host：**候选起始端口**；client：**具体端口**；noise：0；portprobe：候选起始端口 |
+## | span          | host：**候选个数**；client：1；noise：1；portprobe：候选个数 |
+## | handoff_path  | host：**交接文件路径**；client/noise/portprobe："-" |
+## | noise         | 可选标志，只有噪声探针用 |
+##
+## ★ **端口是动态分配的**（修复轮 3 / F3）：固定端口 = 隐含「全局只有我一个人跑」
+##   的假设，而 SDD 流程里控制器的统一入口与复审子代理的测试**必然并发**
+##   → 固定端口必然被抢 → 产生**假失败**。
+##   → 房主按父进程给的候选序列逐个尝试，**绑定成功**才算这个端口可用。
+##
+## ★ **★ 端口的裁决权归「真实的服务端 socket」**：
+##   **禁止「探测 → 关闭 → 盲信」** —— 探测与真实绑定之间有竞态窗口，
+##   两个并发进程可能同时探测到同一个端口 → 那只是把「固定端口冲突」
+##   换成了「概率性冲突」。所以这里**真的**去 bind，绑定失败就换下一个候选。
+##
+## ★ **★ 交接文件（handoff file）**：房主在**子进程**里，父进程必须在
+##   **启动客户端之前**知道房主实际占的是哪个端口。
+##   → 房主**绑定成功之后**立刻把端口号写进交接文件（一行一个整数）。
+##     「文件存在」⟺「端口已被占住」→ 父进程轮询这个文件即可，
+##     **不再需要 OS.delay_msec(1500) 那种魔法延迟**。
 ##
 ## 结果用 `LINK|` 开头的行写到 stdout，父进程解析。
 ##
@@ -49,6 +72,7 @@ extends SceneTree
 ## 父进程断言的「房主 peer_count=2」「客户端 conn_status=2」就是这两条时序的护栏。
 
 const SessionScript := preload("res://scripts/net/session.gd")
+const PortAlloc := preload("res://tools/port_alloc.gd")
 
 ## 客户端：活到点就回报并退出（必须 > 8 秒的连接超时窗口，C3）。
 const CLIENT_LIFE_MS := 10500
@@ -58,15 +82,29 @@ const HOST_REPORT_MS := 10000
 ## 否则房主一退，客户端的连接就被掐断 —— 那正是修复轮 1 查出来的掉线真因）。
 const HOST_EXIT_MS := 14000
 const STEP_SEC := 0.05
+## 「端口探针」模式（mode = "portprobe"）：绑定成功之后**持有端口**这么久再退出。
+## 为什么要持有：让两个并发探针在时间上**确实重叠** ——
+## 否则测的是「先后」而不是「并发」（先跑完的那个把端口放掉了，后一个就能白捡）。
+const PROBE_HOLD_SEC := 2.0
 
 var _mode := "host"
-var _port := 27040
+## 候选起始端口（host / portprobe）或具体端口（client）。
+var _base := 27100
+## 候选个数（host / portprobe）或 1（client）。
+var _span := 1
+## 交接文件路径（host 用；其它模式是 "-"）。
+var _handoff := "-"
+## 房主（/ 探针）**实际占住**的端口（0 = 还没占住）。
+var _host_port := 0
+## 端口探针的绑定结果（0 = 成功）。
+var _probe_err := 0
 var _session = null
 ## Session 实例的来源："autoload"（生产用的 /root/Session）或 "new_named"（兜底自建）。
 var _session_source := ""
 ## Session 实例的绝对路径（父进程要断言它是 /root/Session）。
 var _session_path := ""
-## 噪声探针模式（第三个 user arg = "noise"）：故意打出引擎 ERROR / WARNING。
+## 噪声探针模式（mode = "noise"，或可选的第 5 个 user arg = "noise"）：
+## 故意打出引擎 ERROR / WARNING。
 var _noise_mode := false
 var _t0 := 0
 
@@ -96,14 +134,22 @@ func _initialize() -> void:
 
 func _boot() -> void:
 	var args := OS.get_cmdline_user_args()
+	# 新契约：-- <mode> <base> <span> <handoff_path> [noise]
 	if args.size() >= 1:
 		_mode = str(args[0])
 	if args.size() >= 2:
-		_port = int(args[1])
-	# 第三个 user arg = "noise" → **噪声探针模式**（修复轮 2 / N-A 的反向自检）：
-	# 故意打出引擎 ERROR / WARNING，父进程据此证明「零 ERROR/WARNING」断言有检测力。
-	# 形如 `-- host 27040 noise`（mode/port 在噪声模式下无意义，不碰网络）。
-	if args.size() >= 3 and str(args[2]) == "noise":
+		_base = int(args[1])
+	if args.size() >= 3:
+		_span = int(args[2])
+	if args.size() >= 4:
+		_handoff = str(args[3])
+	# 噪声标志（可选的第 5 个 user arg = "noise"）→ **噪声探针模式**
+	# （修复轮 2 / N-A 的反向自检）：故意打出引擎 ERROR / WARNING，
+	# 父进程据此证明「零 ERROR/WARNING」断言有检测力。
+	if args.size() >= 5 and str(args[4]) == "noise":
+		_noise_mode = true
+	# mode 本身也可以是 "noise"（父进程用这个形状拉起噪声探针）。
+	if _mode == "noise":
 		_noise_mode = true
 	_t0 = Time.get_ticks_msec()
 
@@ -117,6 +163,8 @@ func _boot() -> void:
 		await _run_noise()
 	elif _mode == "host":
 		await _run_host()
+	elif _mode == "portprobe":
+		await _run_portprobe()
 	else:
 		await _run_client()
 	_report()
@@ -161,8 +209,31 @@ func _run_noise() -> void:
 
 
 func _run_host() -> void:
-	_host_err = _session.host_game(_port)
-	if _host_err != OK:
+	# ★ 真实绑定裁决：按候选序列逐个尝试，**绑定成功**才算这个端口可用。
+	#   绑定失败 = 这个端口被别人占着 → 换下一个候选。
+	#   候选全部失败 → 报告**最后一个**错误码，**不写交接文件**，正常退出。
+	var alloc := PortAlloc.new(_base, maxi(_span, 1), 0)
+	var last_err: Error = ERR_CANT_CREATE
+	while not alloc.exhausted():
+		var p: int = alloc.next()
+		if p < 0:
+			break
+		# 预期失败：引擎自己会打一条 ERROR（"Couldn't create an ENet host."）→ 压掉，保持输出干净。
+		Engine.print_error_messages = false
+		last_err = _session.host_game(p)
+		Engine.print_error_messages = true
+		if last_err != OK:
+			continue
+		_host_port = p
+		# ★ 写交接文件（**绑定成功之后**才写 → 「文件存在」⟺「端口已被占住」）。
+		if not _write_handoff(p):
+			# 写失败 → 报告错误并退出（父进程会因等不到交接文件而判失败）。
+			_host_err = ERR_FILE_CANT_OPEN
+			return
+		break
+	if _host_port == 0:
+		# 候选全部失败 → 不写交接文件，回报最后一个错误码。
+		_host_err = last_err
 		return
 	# 先 host 成功，再挂到 MultiplayerAPI（attach_to 在没有 peer 时是空操作）
 	_session.apply_to_multiplayer()
@@ -180,8 +251,57 @@ func _run_host() -> void:
 		_track_conn()
 
 
+## 「端口探针」模式（mode = "portprobe"）：取候选 → **真实绑定** → 回报端口号。
+##
+## 存在的理由：tools/test_port_alloc.gd 的 A3 要证明
+## 「两个并发进程拿到**不同**的端口」。
+## → 两个探针**从同一个候选开始**（父进程给同一个 base/span），
+##   它们就会**真的抢同一个端口** → 输的那个必须换下一个候选。
+##   这正是「真实绑定裁决」跨进程成立的直接证据。
+## → 绑定成功之后**持有端口** PROBE_HOLD_SEC 再退出，
+##   保证两个探针在时间上**确实重叠**。
+func _run_portprobe() -> void:
+	var alloc := PortAlloc.new(_base, maxi(_span, 1), 0)
+	while not alloc.exhausted():
+		var p: int = alloc.next()
+		if p < 0:
+			break
+		var t := ENetTransport.new()
+		Engine.print_error_messages = false
+		var e: Error = t.host(p, 1)
+		Engine.print_error_messages = true
+		if e != OK:
+			# 绑定失败 = 端口被别人占着 → 换下一个候选。
+			continue
+		_host_port = p
+		_probe_err = 0
+		# 持有端口一段时间 → 两个探针真正并发地各占一个端口。
+		await create_timer(PROBE_HOLD_SEC).timeout
+		return
+	_probe_err = ERR_CANT_CREATE
+
+
+## 把实际占住的端口写进**交接文件**（父进程据此知道该连哪个端口）。
+##
+## ★ 必须在**绑定成功之后**写 → 「文件存在」⟺「端口已被占住」。
+## ★ 写失败（目录不存在 / 权限）→ 返回 false，让调用方**明确失败**。
+func _write_handoff(port: int) -> bool:
+	if _handoff == "" or _handoff == "-":
+		push_error("[link_child] 没有交接文件路径")
+		return false
+	var f := FileAccess.open(_handoff, FileAccess.WRITE)
+	if f == null:
+		push_error("[link_child] 交接文件打不开：%s" % _handoff)
+		return false
+	f.store_string("%d\n" % port)
+	f.close()
+	return true
+
+
 func _run_client() -> void:
-	_join_err = _session.join_game("127.0.0.1", _port)
+	# ★ base 就是**具体端口**，span = 1：**只连这一个端口**。
+	#   **不允许**在连不上时换端口（那会连到别人的服务器）。
+	_join_err = _session.join_game("127.0.0.1", _base)
 	if _join_err != OK:
 		return
 	_session.apply_to_multiplayer()
@@ -236,6 +356,10 @@ func _report() -> void:
 	_link("session_source=%s" % _session_source)
 	_link("host_err=%d" % _host_err)
 	_link("join_err=%d" % _join_err)
+	# ★ 房主（/ 探针）**实际占住**的端口。
+	#   父进程要拿它和交接文件里的端口**交叉核对**（防交接文件写错）。
+	_link("host_port=%d" % _host_port)
+	_link("probe_err=%d" % _probe_err)
 	_link("is_host=%d" % (1 if _session.is_host() else 0))
 	_link("peer_count=%d" % _session.peer_count())
 	_link("roster=%s" % _join_ids(_session.peers()))

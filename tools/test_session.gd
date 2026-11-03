@@ -44,16 +44,30 @@ extends SceneTree
 ## 客户端用本地 peer_list() 算人数在 3 人局必错 → 名单一律以房主为权威。
 ## 裁决②：清单**定向**发给本人，客户端只看得到自己那一份。
 ##
-## 端口：27030（2 人局）/ 27031（3 人局）/ 27032（占用）/ 27033（失败用例），
-## 避开 Task 6 用过的 27015-27024。收尾全部 close() 并断言端口已释放。
+## ------------------------------------------------------------------
+## 【端口：运行时动态分配】（修复轮 3 / F3）
+## ------------------------------------------------------------------
+## 固定端口 = 隐含「全局只有我一个人跑」的假设，而 SDD 流程里
+## 「控制器跑统一入口」与「复审子代理跑测试」是**必然并发**的
+## → 固定端口必然被抢 → 产生**假失败**。
+## → 端口从 res://tools/port_alloc.gd 的候选池（27100 起、跨 200 个）里取，
+##   并且**由真实的服务端 socket 裁决**：绑定成功才算这个端口可用，
+##   绑定失败就换下一个候选（见 _host_on / _bind_raw）。
+##
+## ★ 收尾仍然全部 close() 并**断言端口已释放**（端口是动态的了，
+##   这条断言检查的是「本轮用的那几个具体端口」，不再是写死的常量）。
 
 const SessionScript := preload("res://scripts/net/session.gd")
+const PortAlloc := preload("res://tools/port_alloc.gd")
 
-const HOST_PORT := 27030
-const THREE_HOST_PORT := 27031
-const BUSY_PORT := 27032
-const FAIL_PORT := 27033
-const LOBBY_PORT := 27034
+## 端口候选池的游标（同一个进程内绝不重复给出同一个候选）。
+var _alloc := PortAlloc.new()
+
+## 「候选端口被别人占着 → 换下一个」的次数（诊断用；正常应为 0）。
+var _bind_retries := 0
+
+## 本轮实际用掉的端口（用来断言它们互不相同）。
+var _used_ports: Array[int] = []
 
 ## lobby_ui.gd 的 5 条 @onready 节点路径（必须与 scenes/lobby.tscn 完全一致）。
 const LOBBY_PATHS := [
@@ -147,7 +161,9 @@ func _boot() -> void:
 	_s_host = _new_session()
 	_s_host.set_transport(ENetTransport.new())
 
-	var e := _s_host.host_game(HOST_PORT)
+	var r_host := _host_on(_s_host)
+	var host_port: int = int(r_host["port"])
+	var e: Error = r_host["err"]
 	_fails += _check(e == OK, "Session 托管成功")
 	_fails += _check(_s_host.is_host(), "Session 是 host")
 	_fails += _check(_s_host.peer_count() == 1, "房主自己算 1 人")
@@ -177,7 +193,7 @@ func _boot() -> void:
 	# ==================================================================
 	_s_client = _new_session()
 	_s_client.set_transport(ENetTransport.new())
-	_s_client.join_game("127.0.0.1", HOST_PORT)
+	_s_client.join_game("127.0.0.1", host_port)
 
 	# 等房主侧的传输看到客户端（真实 ENet 握手）
 	var host_saw_client := false
@@ -366,15 +382,17 @@ func _boot() -> void:
 	# ==================================================================
 	_s_host2 = _new_session()
 	_s_host2.set_transport(ENetTransport.new())
-	var e2 := _s_host2.host_game(THREE_HOST_PORT)
+	var r_host2 := _host_on(_s_host2)
+	var three_host_port: int = int(r_host2["port"])
+	var e2: Error = r_host2["err"]
 	_fails += _check(e2 == OK, "3 人局的房主开房成功")
 
 	_s_c2a = _new_session()
 	_s_c2a.set_transport(ENetTransport.new())
-	_s_c2a.join_game("127.0.0.1", THREE_HOST_PORT)
+	_s_c2a.join_game("127.0.0.1", three_host_port)
 	_s_c2b = _new_session()
 	_s_c2b.set_transport(ENetTransport.new())
-	_s_c2b.join_game("127.0.0.1", THREE_HOST_PORT)
+	_s_c2b.join_game("127.0.0.1", three_host_port)
 
 	var three_ready := false
 	for i in 300:
@@ -437,7 +455,9 @@ func _boot() -> void:
 	# ==================================================================
 	var busy := ENetTransport.new()
 	_transports.append(busy)
-	var e_busy := busy.host(BUSY_PORT, 2)
+	var r_busy := _bind_raw(busy, 2)
+	var busy_port: int = int(r_busy["port"])
+	var e_busy: Error = r_busy["err"]
 	_fails += _check(e_busy == OK, "占用端口的对照 server 开房成功")
 
 	var s3 = _new_session()
@@ -446,7 +466,7 @@ func _boot() -> void:
 	# 这里用 Engine.print_error_messages = false 压掉，保持测试输出干净；
 	# 真正的判据是下面那条「返回非 OK 的 Error」。
 	Engine.print_error_messages = false
-	var e3 := s3.host_game(BUSY_PORT)
+	var e3 := s3.host_game(busy_port)
 	Engine.print_error_messages = true
 	_fails += _check(e3 != OK, "端口被占时 host_game 返回非 OK 的 Error（实际 %d）" % e3)
 	_fails += _check(not s3.is_host(), "host 失败后 is_host() 仍为 false")
@@ -460,7 +480,7 @@ func _boot() -> void:
 		"host 失败后 Session 丢弃了那个失败的 transport")
 	# 腾出端口后再点一次「创建房间」必须成功（证明状态是干净可重来的）
 	_close_peer(busy.get_peer())
-	var e3b := s3.host_game(BUSY_PORT)
+	var e3b := s3.host_game(busy_port)
 	_fails += _check(e3b == OK,
 		"host 失败后再点一次创建房间能成功（实际 %d）" % e3b)
 	_fails += _check(s3.is_host(), "重试之后 Session 又是房主")
@@ -470,8 +490,10 @@ func _boot() -> void:
 	var s4 = _new_session()
 	s4.set_transport(ENetTransport.new())
 	# 同上：非法地址 → create_client 失败，引擎会打一条 ERROR（预期内）。
+	# 这个端口只是「参数占位」，**不会被绑定**（join 用的是非法地址）。
+	var fail_port: int = _alloc.next()
 	Engine.print_error_messages = false
-	var e4 := s4.join_game("不是一个服务器地址", FAIL_PORT)
+	var e4 := s4.join_game("不是一个服务器地址", fail_port)
 	Engine.print_error_messages = true
 	_fails += _check(e4 != OK, "非法地址 join 返回非 OK 的 Error（实际 %d）" % e4)
 	_fails += _check(not s4.is_host(), "join 失败后 is_host() 仍为 false")
@@ -481,7 +503,7 @@ func _boot() -> void:
 	_fails += _check(s4.get("_transport") == null,
 		"join 失败后 Session 丢弃了那个失败的 transport")
 	# 再点一次「加入房间」必须能成功（这次地址是对的）
-	var e4b := s4.join_game("127.0.0.1", HOST_PORT)
+	var e4b := s4.join_game("127.0.0.1", host_port)
 	_fails += _check(e4b == OK,
 		"join 失败后再点一次加入房间能成功（实际 %d）" % e4b)
 
@@ -497,6 +519,8 @@ func _boot() -> void:
 	const MISSING_SCENE := "res://scenes/__scene_missing_for_test__.tscn"
 	_fails += _check(not ResourceLoader.exists(MISSING_SCENE),
 		"前提：注入的假场景路径确实不存在")
+	# 大厅守卫用例的房端口（**动态分配**；声明在 if 外面，收尾的「端口已释放」断言要用）。
+	var lobby_port := -1
 	var lobby_packed: PackedScene = load("res://scenes/lobby.tscn")
 	if lobby_packed != null:
 		var lobby2 = lobby_packed.instantiate()
@@ -508,8 +532,10 @@ func _boot() -> void:
 			"大厅的对局场景路径可被注入（实际 '%s'）" % str(lobby2.get("game_scene_path")))
 		var s_lobby = _new_session()
 		s_lobby.set_transport(ENetTransport.new())
-		var e_lobby := s_lobby.host_game(LOBBY_PORT)
-		_fails += _check(e_lobby == OK, "大厅守卫用例：先建一个房（端口 %d）" % LOBBY_PORT)
+		var r_lobby := _host_on(s_lobby)
+		lobby_port = int(r_lobby["port"])
+		var e_lobby: Error = r_lobby["err"]
+		_fails += _check(e_lobby == OK, "大厅守卫用例：先建一个房（端口 %d）" % lobby_port)
 		# 让大厅界面用这个房间（默认它拿的是 autoload 的那个）
 		lobby2.set("_session", s_lobby)
 		var lobby_round_started := 0
@@ -575,20 +601,29 @@ func _boot() -> void:
 			p.close()
 
 	var probe := ENetTransport.new()
-	var e_free := probe.host(HOST_PORT, 1)
-	_fails += _check(e_free == OK, "收尾后端口 %d 已释放（实际 %d）" % [HOST_PORT, e_free])
+	var e_free := probe.host(host_port, 1)
+	_fails += _check(e_free == OK, "收尾后端口 %d 已释放（实际 %d）" % [host_port, e_free])
 	if probe.get_peer() != null:
 		probe.get_peer().close()
 	var probe2 := ENetTransport.new()
-	var e_free2 := probe2.host(THREE_HOST_PORT, 1)
-	_fails += _check(e_free2 == OK, "收尾后端口 %d 已释放（实际 %d）" % [THREE_HOST_PORT, e_free2])
+	var e_free2 := probe2.host(three_host_port, 1)
+	_fails += _check(e_free2 == OK, "收尾后端口 %d 已释放（实际 %d）" % [three_host_port, e_free2])
 	if probe2.get_peer() != null:
 		probe2.get_peer().close()
 	var probe3 := ENetTransport.new()
-	var e_free3 := probe3.host(LOBBY_PORT, 1)
-	_fails += _check(e_free3 == OK, "收尾后端口 %d 已释放（实际 %d）" % [LOBBY_PORT, e_free3])
+	var e_free3 := probe3.host(lobby_port, 1)
+	_fails += _check(e_free3 == OK, "收尾后端口 %d 已释放（实际 %d）" % [lobby_port, e_free3])
 	if probe3.get_peer() != null:
 		probe3.get_peer().close()
+
+	# 本轮动态分配的端口必须**互不相同**（否则「端口被占」那条用例可能被别人抢跑）。
+	var uniq: Array[int] = []
+	for p in _used_ports:
+		if not uniq.has(p):
+			uniq.append(p)
+	_fails += _check(uniq.size() == _used_ports.size(),
+		"本轮动态分配的 %d 个端口互不相同（去重后 %d 个）"
+		% [_used_ports.size(), uniq.size()])
 
 	print("")
 	print("断言总数：%d" % _total)
@@ -598,6 +633,58 @@ func _boot() -> void:
 	else:
 		print("TEST FAILED: %d 项" % _fails)
 		quit(1)
+
+
+## ------------------------------------------------------------------
+## 【真实绑定裁决】（修复轮 3 / F3 的核心）
+## ------------------------------------------------------------------
+## 拿候选 → **真的 host_game() / host()** → 绑定失败就换下一个候选。
+##
+## ★ **这里不做探测**：探测 socket 与真实绑定之间有**竞态窗口** ——
+##   两个并发进程可能同时探测到同一个端口、都以为它是空的，
+##   然后其中一个真实绑定失败 → 测试失败
+##   （那只是把「固定端口冲突」换成了「概率性冲突」）。
+##   → 端口的裁决权归**真实的服务端 socket**：绑定成功才算这个端口可用。
+##
+## ★ 候选用尽 → 明确失败（port = -1），**严禁**静默回退到任何固定端口。
+##
+## ★ Session.host_game() 失败时会**丢弃**那个失败的 transport 并回到大厅态
+##   （scripts/net/session.gd：host_game → _drop_transport），
+##   所以下一次 host_game() 会自己新建一个 transport —— 可以在同一个 Session 上重试。
+func _host_on(s: SessionScript) -> Dictionary:
+	var attempts := 0
+	while not _alloc.exhausted():
+		var p: int = _alloc.next()
+		if p < 0:
+			break
+		attempts += 1
+		# 预期失败：引擎自己会打一条 ERROR（"Couldn't create an ENet host."）→ 压掉，保持输出干净。
+		Engine.print_error_messages = false
+		var e: Error = s.host_game(p)
+		Engine.print_error_messages = true
+		if e == OK:
+			_used_ports.append(p)
+			return {"port": p, "err": e, "attempts": attempts}
+		_bind_retries += 1
+	return {"port": -1, "err": ERR_CANT_CREATE, "attempts": attempts}
+
+
+## 同上，但绑定的是一个**裸的** ENetTransport（不经过 Session）。
+func _bind_raw(t: ENetTransport, max_clients: int) -> Dictionary:
+	var attempts := 0
+	while not _alloc.exhausted():
+		var p: int = _alloc.next()
+		if p < 0:
+			break
+		attempts += 1
+		Engine.print_error_messages = false
+		var e: Error = t.host(p, max_clients)
+		Engine.print_error_messages = true
+		if e == OK:
+			_used_ports.append(p)
+			return {"port": p, "err": e, "attempts": attempts}
+		_bind_retries += 1
+	return {"port": -1, "err": ERR_CANT_CREATE, "attempts": attempts}
 
 
 ## 新建一个 Session 并登记（便于收尾时统一 queue_free）。
