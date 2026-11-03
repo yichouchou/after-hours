@@ -241,6 +241,49 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
   交接文件路径必须**每次唯一**（并发跑时互不干扰）。
 - **Task 9–13 的所有新测试必须用动态端口**，新端口只能从 27100+ 段里取。
 
+**Task 10 交付的契约（Task 11 / 12 必须逐字对齐）**
+
+> 来源：Task 10 实现 commit `8d04a01` + 修复轮 1 commit `9b4b164`（2026-11-04）。
+> 计划正文 Task 10 的 `game_rpc.gd` 参考实现有 5 处错，见下面每条。
+
+- **`behavior_id` 必须真的进广播载荷，且载荷恰好 4 个字段**
+  （计划正文写 `mischief_resolved.emit(peer_id, &"", …)` → `behavior_id` 是**空串**）。
+  → 载荷 = `{peer_id: int, behavior_id: StringName, success: bool, reason: String}`；
+  `caught` **不单独进载荷**（用 `reason == "caught"` 表达）。
+  → **线上 `behavior_id` 是 `String`**（StringName 线上要转 String，Task 7 的教训），
+    **信号层**再转回 `StringName`。
+- **`has_partner` / `needs_partner` 不许硬编码**（计划正文写死 true/false → 搭档机制完全没接线）。
+  → `needs_partner` 取自那张牌自己的 `Mischief.needs_partner`；
+    `has_partner` 取自实际搭档状态（`Interaction.has_partner_near()`）。
+  → 效率倍率 = 需要搭档且缺搭档时 **duration × 2**（纯函数 `Interaction.effective_duration()`）。
+- **「先到先得」台账在**房主侧**（计划正文让 `Rules` 裁决归属 → 但 `Rules` 是无状态单次裁决，
+  明写「本层不裁决归属」）。→ `Interaction.ClaimLedger`（纯逻辑、可单测）。
+  落败方**零惩罚**：只是这一条行为算没完成。
+- **两个抓捕通道必须分开**：
+  - 守卫通道（Task 9）：`GuardBrain.update()` 返回 `catch_player` → **任意时刻**可触发 → 押送；
+  - 裁决通道（Task 10）：`Rules.evaluate()` 的 `reason == "caught"` → **只在捣蛋完成瞬间**被问询。
+  → `Rules.evaluate()` **只在完成瞬间**调用（`progress >= 1.0`）；
+    `reason == "in_progress"` 是**非终态** → 不广播 / 不清进度 / 不触发护送 / 不占台账。
+- **进度必须两个字段**（P1「进度不清零」与设计 §4.3「失去手中未交付的道具」是两件事）：
+  - `completed_mischief: int` —— 已完成捣蛋次数，**被抓 / 落败都不清零**（零失败惩罚）；
+  - `current_mischief_progress: float` —— 手上那一条的进行中进度，**被抓时作废**（那一条要重做，
+    **不是惩罚**）。
+  → **不许**用一个字段表达这两件事。
+- **拔路灯的实际熄灯**只走 Task 9 已定的读取契约：
+  **meta `"lamp_on"` → 属性 `lamp_on` → 都没有就当亮着**（`guard.gd:_lamp_is_on()`）。
+  → 熄灯**只写 meta `"lamp_on"`**（`Interaction.set_lamp_on()`）。
+  → **同一盏灯只能选一种注入方式**（`set_lamp_root()` **或** `set_lamps()`，不许同时）
+    —— 两种都上 → 同一盏灯算两遍 → `light_factor` = 0.6 × 0.6 = **0.36**（而不是 0.6）。
+- **★ 断言不许依赖工作区的换行符**（Task 10 修复轮 1 的实测教训）：
+  仓库已加 `.gitattributes`（`* text=auto eol=lf`），但**断言自身仍必须先归一化换行**再比对
+  —— 否则「同一个 commit 在干净检出上跑不过自己的测试」（实测：5 条 §4-17 全红、退出码 1）。
+  → 写「逐字比对源码文本」的断言时，一律先 `replace("\r\n","\n")`。
+- **★ 生产入口函数必须被真正执行过**：只测内部函数 + 文本扫描是不够的
+  —— `submit_mischief()` / `send_submit_mischief()` 两个 RPC 入口曾**从未被测试调用过**，
+  三个变异（progress 改 0.5 / 删掉房主本地投递分支 / 房主写远端玩家进度）**全部漏网**。
+  → `@rpc("call_remote")` **只影响 `.rpc()` 调用**；**直接调方法体会照常执行** —— 这就是补行为断言的手法。
+
+
 
 
 
