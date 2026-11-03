@@ -34,21 +34,26 @@ func _boot() -> void:
 		await process_frame
 		await process_frame
 
-	# 3) Router.goto()：目标场景不存在时必须安全跳过，不改变 current_scene
+	# 3) Router.goto()：跳到真实场景要真的切过去，且不改动 last_skipped_scene
+	if router != null:
+		var skipped_before: String = router.last_skipped_scene
+		router.goto("res://scenes/main.tscn")
+		await process_frame
+		await process_frame
+		fails += _check(current_scene != null, "goto 后 current_scene 非空")
+		fails += _check(current_scene != null and current_scene.scene_file_path == "res://scenes/main.tscn",
+			"goto 后 current_scene 来自 main.tscn")
+		fails += _check(router.last_skipped_scene == skipped_before, "正常跳转不改动 last_skipped_scene")
+
+	# 4) Router.goto()：目标场景不存在时必须安全跳过，并留下可观测记录
 	if router != null:
 		var before := current_scene
 		router.goto("res://scenes/不存在的场景.tscn")
 		await process_frame
 		await process_frame
 		fails += _check(current_scene == before, "goto 不存在的场景不改变 current_scene")
-
-	# 4) Router.goto()：跳到真实场景要真的切过去
-	if router != null:
-		router.goto("res://scenes/main.tscn")
-		await process_frame
-		await process_frame
-		fails += _check(current_scene != null, "goto 后 current_scene 非空")
-		fails += _check(current_scene != null and current_scene.name == "Main", "goto 后 current_scene 是 Main")
+		fails += _check(router.last_skipped_scene == "res://scenes/不存在的场景.tscn",
+			"goto 缺失场景时记录 last_skipped_scene")
 
 	print("")
 	if fails == 0:
