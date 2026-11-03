@@ -123,6 +123,14 @@ func _boot() -> void:
 	fails += _check(not _duplicate_hands(fake).is_empty(),
 		"集合口径自检：集合相同但顺序不同的两份清单被判为重复")
 
+	# ------------------------------------------------------------------
+	# 受限池（可用 target tag 少于全部 10 个）的规则 6：
+	#   pool.size() >  n → 可达集合多于 1 个 → 必须保证集合唯一（重抽路径）
+	#   pool.size() <= n → 可达集合唯一可达 → 规则 6 数学上不可满足，允许重复
+	# 这一段专门盯住"提前退出"的合法/非法边界（修复轮 3 的缺陷就在这条边界上）。
+	# ------------------------------------------------------------------
+	fails += _check_restricted_pools(all)
+
 	# 稀缺但仍够 3 张且类别够分：每人仍拿满 clampi(2+1,3,5)=3 张，且用尽所有可用牌
 	var scarce: Array[StringName] = [&"carrot", &"pot"]
 	var rng3 := RandomNumberGenerator.new()
@@ -192,7 +200,9 @@ func _ids(list: Array) -> Array:
 
 ## 逐份清单检查规则 3（同类 ≤ 2）、规则 4（≥1 张 noise/decor）、规则 5（≥1 张 prank）。
 ## 返回可读的违规描述列表。
-func _rule_violations(deal: Array) -> Array[String]:
+## check_floor = false 时只查规则 3 —— 受限池里可能压根没有 prank / noise / decor，
+## 那时规则 4/5 在该池上无解，不能算实现违约。
+func _rule_violations(deal: Array, check_floor: bool = true) -> Array[String]:
 	var bad: Array[String] = []
 	for pi in deal.size():
 		var cats := {}
@@ -207,11 +217,83 @@ func _rule_violations(deal: Array) -> Array[String]:
 		for c in cats:
 			if int(cats[c]) > 2:
 				bad.append("P%d 同类 %s 有 %d 张" % [pi, c, int(cats[c])])
+		if not check_floor:
+			continue
 		if not has_noise_or_decor:
 			bad.append("P%d 没有 noise/decor" % pi)
 		if not has_prank:
 			bad.append("P%d 没有 prank" % pi)
 	return bad
+
+
+## 受限池下的规则 6 断言（修复轮 3 补：这一段盯住"提前退出"的合法/非法边界）。
+##
+##   pool.size() >  n：可达集合多于 1 个 → 集合口径必须两两不同（走重抽路径）
+##   pool.size() <= n：可达集合唯一可达 → 规则 6 数学上不可满足，契约是"允许重复"
+##
+## 池子由可用 target tag 决定；注意 pot 同时对应 prank_pot 与 noise_pot 两张牌。
+func _check_restricted_pools(all: Array) -> int:
+	var fails := 0
+	var pool3: Array[StringName] = [&"carrot", &"hat", &"basket"]
+	var pool4: Array[StringName] = [&"carrot", &"hat", &"chair", &"sign"]
+	var pool5: Array[StringName] = [&"carrot", &"hat", &"bench", &"pot"]
+	var pool7: Array[StringName] = [&"carrot", &"hat", &"chair", &"bench", &"pot", &"sign"]
+	var pools := [
+		["池=3 张同类（steal×3）", pool3],
+		["池=4（steal2/mess1/decor1）", pool4],
+		["池=5（steal2/prank2/noise1）", pool5],
+		["池=7（steal2/mess1/prank2/decor1/noise1）", pool7],
+	]
+
+	for spec in pools:
+		var label: String = spec[0]
+		var ptags: Array[StringName] = spec[1]
+		var cards: Array[Mischief] = []
+		for m in all:
+			if ptags.has(m.target_tag):
+				cards.append(m)
+		var pool_size := cards.size()
+		# 规则 4/5 只在池子里确实存在对应类别时才可满足
+		var can_check_floor := false
+		var has_prank := false
+		var has_noise_or_decor := false
+		for m in cards:
+			if m.category == "prank":
+				has_prank = true
+			if m.category == "noise" or m.category == "decor":
+				has_noise_or_decor = true
+		can_check_floor = has_prank and has_noise_or_decor
+
+		for pc in [2, 3, 4, 5, 6]:
+			var n: int = clampi(pc + 1, 3, 5)
+			if pool_size > n:
+				# 可达集合多于 1 个 → 集合口径必须两两不同
+				var bad: Array[String] = []
+				for s in 40:
+					var rng := RandomNumberGenerator.new()
+					rng.seed = 77000 + s * 13 + pc * 7 + pool_size
+					var deal := MischiefDeck.generate(all, pc, rng, ptags)
+					for p in deal:
+						if p.size() != n:
+							bad.append("种子 %d: 某人 %d 张（应 %d）" % [s, p.size(), n])
+					bad.append_array(_rule_violations(deal, can_check_floor))
+					bad.append_array(_duplicate_hands(deal))
+				fails += _check(bad.is_empty(),
+					"%s × %d 人局（池 %d 张 > n %d）× 40 种子：集合口径两两不同%s"
+					% [label, pc, pool_size, n, _first(bad)])
+			else:
+				# 可达集合唯一 → 规则 6 数学上不可满足，契约是"允许重复"
+				var rng := RandomNumberGenerator.new()
+				rng.seed = 88000 + pc * 7 + pool_size
+				var deal := MischiefDeck.generate(all, pc, rng, ptags)
+				var same: bool = deal.size() == pc
+				for p in deal:
+					if _set_key(p) != _set_key(deal[0]):
+						same = false
+				fails += _check(same,
+					"%s × %d 人局（池 %d 张 <= n %d）：集合唯一可达，所有玩家清单集合相同（允许重复契约）"
+					% [label, pc, pool_size, n])
+	return fails
 
 
 ## 遍历所有两两组合，找出**行为集合相同**的玩家对（规则 6，集合口径：顺序无关）。

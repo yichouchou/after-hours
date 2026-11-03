@@ -60,11 +60,15 @@ static func generate(all: Array[Mischief], player_count: int,
 ## 那条等差数列上（那样 4-6 人局只能取到 2 个起点，多名玩家必然拿到同一份清单）。
 static func _build_unique_hand(pool: Array[Mischief], n: int, rng: RandomNumberGenerator,
 		deal: Array[Array], index: int) -> Array[Mischief]:
-	# 池子里每个类别的牌都不超过 2 张时，任何一份清单都必然包含池子里**全部**的牌
-	# （类别上限拦不下任何一张，补齐张数只会重复已有的牌）→ 可达的行为集合恒为 1 个，
-	# 重抽也不可能给出不同的集合 → 直接返回，不白跑 32 次重抽。
-	# （池子太小的既有契约保持不变：允许重复，不返回空清单、不崩溃。）
-	if _single_set_only(pool):
+	# 可证唯一：池子比手牌张数还小（或一样大）时，任何一份清单都必然包含池子里
+	# **全部**的牌（取牌循环拦不下任何一张，不够的张数用重复的牌补齐），
+	# 因此可达的行为集合恒为 1 个 → 规则 6 在这种池子上数学上不可满足，
+	# 直接返回即可，不必白跑 32 次重抽。
+	#
+	# 注意：池子比手牌**大**（pool.size() > n）时，手牌只含 n 张，可达集合多于 1 个，
+	# 此时绝不能提前退出 —— 必须走下面的重抽路径去保证集合唯一。
+	# （池子太小时的既有契约保持不变：允许重复，不返回空清单、不崩溃。）
+	if _only_one_set_reachable(pool, n):
 		var only := pool.duplicate()
 		_shuffle(only, rng)
 		return _build_hand(only, n, 0)
@@ -78,7 +82,8 @@ static func _build_unique_hand(pool: Array[Mischief], n: int, rng: RandomNumberG
 		if not _has_same(hand, deal, index):
 			return hand
 		tried[_set_key(hand)] = true
-		# 候选集合已穷举：允许重复，返回当前这份
+		# 兜底：已试过的集合数达到理论上限（很松的上界，只在极端池子上才可能触发）
+		# → 认为候选空间基本耗尽，允许重复，返回当前这份
 		if tried.size() >= _max_distinct_sets(pool.size(), n):
 			break
 	# 池子小到数学上无法给出两份不同的清单：允许重复，返回最后一份候选。
@@ -170,17 +175,13 @@ static func _set_key(list: Array) -> String:
 	return "|".join(ids)
 
 
-## 池子里每个类别的牌都不超过 2 张吗？
-## 是的话，任何一份清单都必然包含池子里**全部**的牌（类别上限拦不下任何一张），
-## 可达的"行为集合"恒为 1 个 → 规则 6 在这种池子上数学上不可满足。
-static func _single_set_only(pool: Array[Mischief]) -> bool:
-	var per_cat := {}
-	for m in pool:
-		var c: int = int(per_cat.get(m.category, 0)) + 1
-		if c > MAX_PER_CATEGORY:
-			return false
-		per_cat[m.category] = c
-	return true
+## 可达的行为集合是否恒为 1 个（可证判据，不是启发式）。
+##
+## 池子比手牌张数小（或一样大）时，取牌循环必然把池里的牌全部取进清单
+## （不够的张数用重复的牌补齐），所以任何两份清单的行为集合都相同。
+## 池子比手牌大时，手牌只含 n 张，可达集合多于 1 个 → 不可提前退出。
+static func _only_one_set_reachable(pool: Array[Mischief], n: int) -> bool:
+	return pool.size() <= n
 
 
 ## 池子能产生的不同"行为集合"数量的上界：Σ C(size, k)，k = 1..min(n, size)。
