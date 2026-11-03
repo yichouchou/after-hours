@@ -77,8 +77,43 @@ func _boot() -> void:
 		_ids(MischiefDeck.generate(all, 3, r2, tags)[0]), "同种子结果一致")
 
 	# ------------------------------------------------------------------
-	# 以下为 task-3 补充断言（brief 未覆盖）：可用行为不足时清单仍应有足够张数
+	# 以下为 task-3 修复轮 1 的补充断言（审查要求：规则 3/4/5 覆盖每一份清单、
+	# 规则 6 覆盖所有两两组合、样本补上 5 人局并扩到 12 个种子）
 	# ------------------------------------------------------------------
+
+	# find_by_id：命中一条 + 找不到返回 null
+	var found := Mischief.find_by_id(all, &"noise_pot")
+	fails += _check(found != null and found.id == &"noise_pot", "find_by_id 命中 noise_pot")
+	var missing := Mischief.find_by_id(all, &"no_such_mischief")
+	fails += _check(missing == null, "find_by_id 找不到时返回 null")
+
+	# 全量断言：2-6 人局 × 12 个种子
+	#   规则 1 每人恒为 clampi(pc+1, 3, 5) 张
+	#   规则 3/4/5 每一份清单都成立（不只 deal[0]）
+	#   规则 6 任意两份清单都不相同（遍历所有两两组合）
+	for pc in [2, 3, 4, 5, 6]:
+		var expect_n: int = clampi(pc + 1, 3, 5)
+		var bad_count: Array[String] = []
+		var bad_rules: Array[String] = []
+		var bad_rule6: Array[String] = []
+		for s in 12:
+			var rng := RandomNumberGenerator.new()
+			# s = 0 时就是 brief 原测试用的种子 12345 + pc
+			rng.seed = 12345 + pc + s * 7
+			var deal := MischiefDeck.generate(all, pc, rng, tags)
+			if deal.size() != pc:
+				bad_count.append("种子 %d: 分了 %d 份" % [s, deal.size()])
+			for p in deal:
+				if p.size() != expect_n:
+					bad_count.append("种子 %d: 某人 %d 张（应 %d）" % [s, p.size(), expect_n])
+			bad_rules.append_array(_rule_violations(deal))
+			bad_rule6.append_array(_duplicate_hands(deal))
+		fails += _check(bad_count.is_empty(),
+			"%d 人局 × 12 种子：每人恒 %d 张%s" % [pc, expect_n, _first(bad_count)])
+		fails += _check(bad_rules.is_empty(),
+			"%d 人局 × 12 种子：每份清单都满足规则 3/4/5%s" % [pc, _first(bad_rules)])
+		fails += _check(bad_rule6.is_empty(),
+			"%d 人局 × 12 种子：任意两份清单都不相同%s" % [pc, _first(bad_rule6)])
 
 	# 稀缺但仍够 3 张且类别够分：每人仍拿满 clampi(2+1,3,5)=3 张，且用尽所有可用牌
 	var scarce: Array[StringName] = [&"carrot", &"pot"]
@@ -111,6 +146,9 @@ func _boot() -> void:
 		if m.target_tag != &"carrot":
 			all_carrot4 = false
 	fails += _check(all_carrot4, "极端稀缺只发目标存在的牌")
+	# 固定"允许重复"这个契约：池子只有 1 张牌时，两份清单必然相同（不是缺陷）
+	fails += _check(_ids(deal4[0]) == _ids(deal4[1]),
+		"极端稀缺契约：池子只有 1 张牌时两份清单必然相同（允许重复，不算失败）")
 
 	# 牌数为 0 或池子为空时不能崩
 	var rng5 := RandomNumberGenerator.new()
@@ -122,6 +160,11 @@ func _boot() -> void:
 	fails += _check(deal6.size() == 2, "无可用目标仍分 2 份")
 	for p in deal6:
 		fails += _check(p.is_empty(), "无可用目标时该份为空而不是崩溃")
+	# all 为空时同样返回 player_count 份空清单
+	var deal7 := MischiefDeck.generate([] as Array[Mischief], 2, rng5, tags)
+	fails += _check(deal7.size() == 2, "行为表为空仍分 2 份")
+	for p in deal7:
+		fails += _check(p.is_empty(), "行为表为空时该份为空而不是崩溃")
 
 	print("")
 	if fails == 0:
@@ -137,6 +180,47 @@ func _ids(list: Array) -> Array:
 	for m in list:
 		out.append(String(m.id))
 	return out
+
+
+## 逐份清单检查规则 3（同类 ≤ 2）、规则 4（≥1 张 noise/decor）、规则 5（≥1 张 prank）。
+## 返回可读的违规描述列表。
+func _rule_violations(deal: Array) -> Array[String]:
+	var bad: Array[String] = []
+	for pi in deal.size():
+		var cats := {}
+		var has_noise_or_decor := false
+		var has_prank := false
+		for m in deal[pi]:
+			cats[m.category] = int(cats.get(m.category, 0)) + 1
+			if m.category == "noise" or m.category == "decor":
+				has_noise_or_decor = true
+			if m.category == "prank":
+				has_prank = true
+		for c in cats:
+			if int(cats[c]) > 2:
+				bad.append("P%d 同类 %s 有 %d 张" % [pi, c, int(cats[c])])
+		if not has_noise_or_decor:
+			bad.append("P%d 没有 noise/decor" % pi)
+		if not has_prank:
+			bad.append("P%d 没有 prank" % pi)
+	return bad
+
+
+## 遍历所有两两组合，找出拿到相同清单的玩家对（规则 6）。
+func _duplicate_hands(deal: Array) -> Array[String]:
+	var bad: Array[String] = []
+	for i in deal.size():
+		for j in range(i + 1, deal.size()):
+			if _ids(deal[i]) == _ids(deal[j]):
+				bad.append("P%d 与 P%d 清单相同：%s" % [i, j, str(_ids(deal[i]))])
+	return bad
+
+
+## 违规列表的首条描述（用于失败诊断）。
+func _first(bad: Array[String]) -> String:
+	if bad.is_empty():
+		return ""
+	return " —— 违规 %d 处，例如：%s" % [bad.size(), bad[0]]
 
 
 func _check(ok: bool, what: String) -> int:
