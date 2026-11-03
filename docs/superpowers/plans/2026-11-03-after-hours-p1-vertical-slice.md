@@ -151,7 +151,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_project.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_project.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `project.godot` 不存在，`load()` 返回 null
 
 - [ ] **Step 3: 建工程配置**
@@ -243,8 +243,8 @@ func _boot() -> void:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `godot --headless --path . --import` （首次必须先导入资源）
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_project.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: --import （首次必须先导入资源）
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_project.gd   # 前置：先跑一次 --import`
 Expected: PASS，`TEST PASSED`，退出码 0
 
 > Router 是 autoload，`--script` 模式下 `get_tree().current_scene` 为 null，
@@ -312,7 +312,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_art.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_art.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— 素材文件不存在
 
 - [ ] **Step 3: 写生成器**
@@ -425,7 +425,7 @@ print("placeholder art written to", ROOT)
 ```bash
 python tools/gen_placeholder_art.py
 godot --headless --path . --import
-godot --headless --path . --quit-after 600 --script res://tools/test_art.gd   # 前置：先跑一次 `godot --headless --path . --import`
+godot --headless --path . --quit-after 600 --script res://tools/test_art.gd   # 前置：先跑一次 --import
 ```
 Expected: PASS，退出码 0
 
@@ -567,7 +567,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_mischief_deck.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_mischief_deck.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `Mischief` 类不存在
 
 - [ ] **Step 3: 写数据与实现**
@@ -716,7 +716,7 @@ static func _shuffle(arr: Array, rng: RandomNumberGenerator) -> void:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_mischief_deck.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_mischief_deck.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 - [ ] **Step 5: 提交**
@@ -829,7 +829,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_guard_brain.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_guard_brain.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `GuardBrain` 类不存在
 
 - [ ] **Step 3: 实现**
@@ -941,7 +941,7 @@ func update(delta: float, ctx: Dictionary) -> Dictionary:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_guard_brain.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_guard_brain.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 - [ ] **Step 5: 提交**
@@ -1033,7 +1033,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_rules.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_rules.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `Rules` 类不存在
 
 - [ ] **Step 3: 实现**
@@ -1075,7 +1075,7 @@ static func evaluate(action: Dictionary, ctx: Dictionary) -> Dictionary:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_rules.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_rules.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 - [ ] **Step 5: 提交**
@@ -1159,7 +1159,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_transport.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_transport.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `ENetTransport` 类不存在
 
 - [ ] **Step 3: 实现**
@@ -1278,7 +1278,7 @@ func poll() -> void:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_transport.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_transport.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 > 若 `peer_list()` 一直为空，检查是否需要 `await process_frame` 让 ENet 有机会收发——ENet 的 `poll()` 是同步的，但连接建立需要若干次 poll。
@@ -1380,7 +1380,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_session.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_session.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `Session` 类不存在
 
 - [ ] **Step 3: 实现 Session**
@@ -1608,11 +1608,11 @@ layout_mode = 2
 text = "开始这一夜"
 ```
 
-> 节点路径必须与上面 `@onready` 一致；建完场景后用 `godot --headless --path . --import` 验证能加载。
+> 节点路径必须与上面 `@onready` 一致；建完场景后用 --import 验证能加载。
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_session.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_session.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 - [ ] **Step 6: 提交**
@@ -1686,7 +1686,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_player.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_player.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `WorldMap` 类不存在
 
 - [ ] **Step 3: 地图数据与实现**
@@ -1833,8 +1833,8 @@ properties/0/replication_mode = 1
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `godot --headless --path . --import`
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_player.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: --import
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_player.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 - [ ] **Step 6: 提交**
@@ -1915,7 +1915,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_guard_flow.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_guard_flow.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `begin_carry` 不存在
 
 - [ ] **Step 3: 补 GuardBrain 的 CARRY/RETURN**
@@ -2088,8 +2088,8 @@ offset = Vector2(-32, -64)
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `godot --headless --path . --import`
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_guard_flow.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: --import
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_guard_flow.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 - [ ] **Step 6: 提交**
@@ -2177,7 +2177,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_interaction.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_interaction.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `Interaction` 类不存在
 
 - [ ] **Step 3: 实现**
@@ -2273,7 +2273,7 @@ func _gather_context(peer_id: int) -> Dictionary:
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_interaction.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_interaction.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 - [ ] **Step 5: 提交**
@@ -2344,7 +2344,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_game_scene.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_game_scene.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— `game.tscn` 不存在
 
 - [ ] **Step 3: 场景与脚本**
@@ -2554,8 +2554,8 @@ script = ExtResource("2_rpc")
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `godot --headless --path . --import`
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_game_scene.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: --import
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_game_scene.gd   # 前置：先跑一次 --import`
 Expected: PASS，退出码 0
 
 - [ ] **Step 5: 提交**
@@ -2656,7 +2656,7 @@ func _check(ok: bool, what: String) -> int:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `godot --headless --path . --quit-after 600 --script res://tools/test_smoke.gd   # 前置：先跑一次 `godot --headless --path . --import``
+Run: `godot --headless --path . --quit-after 600 --script res://tools/test_smoke.gd   # 前置：先跑一次 --import`
 Expected: FAIL —— 缺少 Session / RPC 接线
 
 - [ ] **Step 3: 结算页**
