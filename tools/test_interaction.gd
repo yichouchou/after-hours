@@ -602,6 +602,127 @@ func _boot() -> void:
 	rpc.players_root = saved_players_root
 
 	# ==================================================================
+	# [§4-23] ★ submit_mischief() 是**生产入口**：完成瞬间才问询 Rules
+	#
+	# 派单 §2.5：「Rules.evaluate() 只在**完成瞬间**被问询（progress >= 1.0）」。
+	# 生产调用点在 scripts/net/game_rpc.gd 的 submit_mischief() 里（progress 实参写死 1.0）。
+	# → 这里**真的调一次那个入口**（不是调 adjudicate 旁路），
+	#   断言它走的是**完成瞬间**（占台账 + 广播恰好一次），
+	#   而不是 progress < 1.0 的 in_progress 早退（不占台账、不广播）。
+	# ==================================================================
+	var tid23 := 41
+	var resolved_before23 := resolved.size()
+	rpc.submit_mischief("steal_carrot", tid23)
+	_fails += _check(rpc._ledger.is_claimed(tid23),
+		"[§4-23] submit_mischief 走的是**完成瞬间**（progress = 1.0）→ 台账被占住")
+	_fails += _check(rpc._ledger.owner_of(tid23) == rpc.multiplayer.get_unique_id(),
+		"[§4-23] 台账里这个目标的归属是**本机**（房主）peer id")
+	_fails += _check(resolved.size() == resolved_before23 + 1,
+		"[§4-23] submit_mischief 触发**恰好一次** mischief_resolved_evt")
+	if resolved.size() > resolved_before23:
+		var ev23: Dictionary = resolved[resolved.size() - 1]
+		var bid23 := StringName(str(ev23.get("behavior_id", "")))
+		_fails += _check(not String(bid23).is_empty() and bid23 == &"steal_carrot",
+			"[§4-23] 广播载荷里的 behavior_id **非空**且是真实的行为 id")
+		_fails += _check(bool(ev23.get("success", false)),
+			"[§4-23] 完成瞬间被裁决成**成功**（success == true）")
+		_fails += _check(int(ev23.get("peer_id", -1)) == rpc._ledger.owner_of(tid23),
+			"[§4-23] 台账与广播的 peer_id **一致**")
+
+	# ==================================================================
+	# [§4-24] ★ 房主自己的捣蛋走**本地投递分支**
+	#
+	# scripts/net/game_rpc.gd 的 send_submit_mischief() 里：
+	#   if mp.get_unique_id() == HOST_PEER_ID: submit_mischief(...)  ← 房主本地
+	#   else: submit_mischief.rpc_id(HOST_PEER_ID, ...)              ← 远端
+	# submit_mischief 是 "call_remote" → **发送方本地不会执行**它
+	# → 房主自己捣蛋时若不走本地分支，就**永远不会被裁决**（Task 9 踩过的同一个坑）。
+	# 判据：离线环境里远端分支什么都不会发生 → 「目标被占住 + 广播了一次」
+	#       就等于「走的是本地分支」。
+	# ==================================================================
+	var tid24 := 42
+	var resolved_before24 := resolved.size()
+	_fails += _check(rpc.multiplayer.get_unique_id() == 1,
+		"[§4-24] 前提：本机就是房主（peer id == 1），才会走本地投递分支")
+	rpc.send_submit_mischief("mess_chairs", tid24)
+	_fails += _check(rpc._ledger.is_claimed(tid24),
+		"[§4-24] 房主自己捣蛋 → 走**本地投递分支**（目标被占住；远端分支在离线环境里不会有任何事）")
+	_fails += _check(rpc._ledger.owner_of(tid24) == rpc.multiplayer.get_unique_id(),
+		"[§4-24] 本地投递的台账归属是**本机**（房主）")
+	_fails += _check(resolved.size() == resolved_before24 + 1,
+		"[§4-24] 房主本地投递 → 广播**恰好一次**")
+	if resolved.size() > resolved_before24:
+		var ev24: Dictionary = resolved[resolved.size() - 1]
+		_fails += _check(StringName(str(ev24.get("behavior_id", ""))) == &"mess_chairs",
+			"[§4-24] 广播载荷里的 behavior_id == \"mess_chairs\"")
+
+	# ==================================================================
+	# [§4-25] ★ progress 实参的**结构性**保险（对 §4-23 的补强，不是替代）
+	#
+	# 扫描 scripts/net/game_rpc.gd 的 submit_mischief 方法体：
+	#   必须出现 adjudicate(..., 1.0) —— 第 4 个实参是**字面量 1.0**。
+	# 扫描写成「切方法体 + 正则」→ 容忍空白与换行，不硬编码整行文本。
+	# ==================================================================
+	var submit_block := _method_block(rpc_src, "submit_mischief")
+	var submit_text := ""
+	for l in submit_block:
+		submit_text += str(l) + "\n"
+	var re_progress := RegEx.new()
+	var re_ok := re_progress.compile(
+		"adjudicate\\(\\s*[^,]+\\s*,\\s*[^,]+\\s*,\\s*[^,]+\\s*,\\s*1\\.0\\s*\\)")
+	_fails += _check(submit_block.size() > 0,
+		"[§4-25] 能取到 submit_mischief 的方法块")
+	_fails += _check(re_ok == OK and re_progress.search(submit_text) != null,
+		"[§4-25] submit_mischief 的 adjudicate() **第 4 个实参是字面量 1.0**")
+	_fails += _check(not submit_text.contains("0.5"),
+		"[§4-25] submit_mischief 的方法体里**不出现 0.5**")
+
+	# ==================================================================
+	# [§4-26] ★★ 房主**不许写**远端玩家的进度（行为断言，不是文本代理）
+	#
+	# 派单 §3.3：房主不写别人的进度（进度是**操作方自己**的数据）。
+	# 反例（复审变异 M20）：房主在 adjudicate 里直接给远端玩家写 completed_mischief。
+	# → 这里用**真的 Player 实例**（player.tscn，completed_mischief 是真实字段）
+	#   当那个远端玩家，断言裁决走完之后它的 completed_mischief **仍然是 0**。
+	#   （裸 Node2D 存不住 set("completed_mischief", …) → 断言会假绿，所以不能用裸节点。）
+	# ==================================================================
+	var remote_root := Node2D.new()
+	remote_root.name = "RemotePlayers"
+	root.add_child(remote_root)
+	var remote_player = null
+	if player_packed != null:
+		remote_player = player_packed.instantiate()
+		remote_player.name = "007"
+		remote_player.position = Vector2(600, 600)
+		remote_root.add_child(remote_player)
+		remote_player.set_physics_process(false)
+		await process_frame
+	_fails += _check(remote_player != null,
+		"[§4-26] 前提：造得出一个**真的 Player 实例**当远端玩家")
+	var saved_players_root26 = rpc.players_root
+	rpc.players_root = remote_root
+	var verdict26 := rpc.adjudicate(7, &"steal_carrot", 43, 1.0)
+	rpc.players_root = saved_players_root26
+	_fails += _check(str(verdict26.get("reason", "")) == "ok"
+			and bool(verdict26.get("success", false)),
+		"[§4-26] 前提：裁决确实走完了（reason == ok）→ 下面看房主有没有写远端玩家的进度")
+	var remote_completed: Variant = null
+	var remote_has_field := false
+	if remote_player != null:
+		remote_has_field = _script_props(remote_player).has("completed_mischief")
+		remote_completed = remote_player.get("completed_mischief")
+	_fails += _check(remote_has_field,
+		"[§4-26] 前提：远端玩家节点带**真实的** completed_mischief 字段")
+	_fails += _check(typeof(remote_completed) == TYPE_INT and int(remote_completed) == 0,
+		"[§4-26] 房主**没有写**远端玩家的进度（completed_mischief 仍然是 0，实际 %s）"
+		% str(remote_completed))
+	_fails += _check(typeof(remote_completed) == TYPE_INT and int(remote_completed) != 999,
+		"[§4-26] 远端玩家的进度没被房主改成 999（派单 §3.3：房主不许写远端玩家的进度）")
+	if remote_player != null:
+		remote_player.queue_free()
+	remote_root.queue_free()
+
+	# ==================================================================
 	# [§4-13] 纯净化
 	# ==================================================================
 	var interaction_src := _read_source(INTERACTION_SRC)
@@ -666,12 +787,18 @@ func _make_behavior(id: StringName, duration: float, needs_partner: bool) -> Mis
 	return m
 
 
-## 读源码（纯文本）。
+## 读源码（纯文本）。**换行符归一化**成 "\n"（LF）——
+##
+## ★ 为什么必须归一化：本文件里的 RPC_BLOCK_* 常量写死了 "\n"，
+##   而 Windows 上 `git config core.autocrlf=true` 的**干净检出**会把工作区写成 CRLF
+##   → "\n" 比不过 "\r\n" → §4-17 的「逐字比对」全红
+##   → **同一个 commit 在干净检出上跑不过自己的测试**（断言结论依赖环境）。
+##   → 读出来先把 CRLF / 裸 CR 统一成 LF，两种工作区的结论一致。
 func _read_source(path: String) -> String:
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
 		return ""
-	return f.get_as_text()
+	return f.get_as_text().replace("\r\n", "\n").replace("\r", "\n")
 
 
 ## 源码里有没有出现「作为一个独立词」的 token（**词边界**匹配）。
