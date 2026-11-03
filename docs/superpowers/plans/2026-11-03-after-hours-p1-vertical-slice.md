@@ -17,9 +17,14 @@
 - **手绘风，纹理过滤用线性（Linear），不是 Nearest** —— 与 Pixel Town 的像素管线刻意区分
 - 玩法逻辑文件（`scripts/game/**`）**禁止**引用 `get_tree()` / `get_node()` / 场景节点；它们必须是纯函数或纯状态对象
 - **Gameplay 层禁止出现任何 `Steam.` 调用**；Steam 代码只允许出现在 `scripts/net/steam_transport.gd`
-- 测试一律用 headless 脚本，退出码 0 = 通过，1 = 失败：
-  `godot --headless --path <proj> --quit-after 600 --script res://tools/test_<name>.gd`
-  **必须带 `--quit-after`**：本测试形态（`extends SceneTree` + `await` + `quit()`）在脚本发生
+- 测试一律用 headless 脚本，退出码 0 = 通过，1 = 失败。
+- **规范命令链是两步，顺序不能换**（缺第一步会导致干净检出上 `load()` 抛
+  "No loader found for resource"，每个 PNG 一条 ERROR）：
+  1. `godot --headless --path <proj> --import`
+  2. `godot --headless --path <proj> --quit-after 600 --script res://tools/test_<name>.gd`
+- 项目根的 **`tools/run_tests.ps1` 是全项目唯一的测试入口**，固化上面两步并依次跑全部测试。
+- **跑测试必须带 `--quit-after N`（N 取 600，约 10 秒）**。
+  原因（Task 1 修复轮 2 实测）：本测试形态（`extends SceneTree` + `await` + `quit()`）在脚本发生
   运行时错误时协程会被中断、`quit()` 永不执行，进程会**永久挂起而不是失败退出**。
   `--quit-after` 是命令行侧保险，不需改动任何测试代码。
 - **判定测试通过 = 退出码为 0 且输出含 `TEST PASSED`**（两者都要看）。

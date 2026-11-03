@@ -30,6 +30,11 @@ GRASS_L = (88, 122, 86)
 DIRT = (120, 96, 70)
 DIRT_L = (142, 116, 86)
 
+# 立绘整体下移的像素数。立绘的"脚底"（影子底沿）必须触及画布最后一行 y=63，
+# 这样贴图铺满 y=-64..0、脚底与节点原点对齐（下游用 offset = Vector2(-32, -64)）。
+# 角色内容原高 57 行（y=4..60），下移 3 行后为 y=7..63。
+CHAR_Y_OFFSET = 3
+
 
 def ensure(path):
     os.makedirs(path, exist_ok=True)
@@ -52,20 +57,21 @@ def character(idx):
     main, dark, line = PALETTE[idx % len(PALETTE)]
     im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    # 影子
-    d.ellipse((20, 54, 44, 60), fill=(0, 0, 0, 60))
+    o = CHAR_Y_OFFSET
+    # 影子（贴着画布底边，脚底与节点原点对齐）
+    d.ellipse((20, 54 + o, 44, 60 + o), fill=(0, 0, 0, 60))
     # 身体
-    d.rounded_rectangle((22, 26, 42, 54), radius=6, fill=main, outline=dark, width=2)
+    d.rounded_rectangle((22, 26 + o, 42, 54 + o), radius=6, fill=main, outline=dark, width=2)
     # 头
-    d.ellipse((22, 8, 42, 30), fill=(246, 212, 178), outline=dark, width=2)
+    d.ellipse((22, 8 + o, 42, 30 + o), fill=(246, 212, 178), outline=dark, width=2)
     # 头发/帽子
-    d.pieslice((21, 4, 43, 26), 180, 360, fill=dark)
+    d.pieslice((21, 4 + o, 43, 26 + o), 180, 360, fill=dark)
     # 眼睛
-    d.rectangle((28, 17, 30, 20), fill=(30, 26, 24))
-    d.rectangle((35, 17, 37, 20), fill=(30, 26, 24))
+    d.rectangle((28, 17 + o, 30, 20 + o), fill=(30, 26, 24))
+    d.rectangle((35, 17 + o, 37, 20 + o), fill=(30, 26, 24))
     # 手臂
-    d.line((22, 32, 16, 46), fill=main, width=5)
-    d.line((42, 32, 48, 46), fill=main, width=5)
+    d.line((22, 32 + o, 16, 46 + o), fill=main, width=5)
+    d.line((42, 32 + o, 48, 46 + o), fill=main, width=5)
     im.save(os.path.join(ensure(os.path.join(ROOT, "assets", "chars")),
                          "char_%d.png" % idx))
 
