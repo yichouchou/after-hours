@@ -75,6 +75,21 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
   **不可被 RPC 编码** → 发清单时必须先转成**基础类型字典**（`id/title/category/target_tag/needs_partner/duration/points`），
   客户端收到后**本地重建** `Mischief` 对象。
   `Session.deal()` 在房主与客户端两端都返回 `Mischief` 对象的数组，调用方（Task 10 裁决 / Task 11 HUD）不需要知道线格式。
+- **清单的线格式字段清单固定为**（Task 7 审查裁决，下游不许各自发明）：
+  `{"id": String, "title": String, "category": String, "target_tag": String,
+    "needs_partner": bool, "duration": float, "points": int}`
+  —— 与 `Mischief` 的 7 个字段一一对应；`StringName` 在线上转成 `String`。
+  客户端用这 7 个字段本地重建 `Mischief` 对象。
+- **Session 的连接超时兜底只对客户端生效**：房主永远不会收到 `server_connected`（该信号是 client 专用），
+  房主若也起超时计时器会在建房若干秒后**把自己刚建的房间拆掉**。
+- **名单广播不能放在原生 peer 信号回调里同步发**：原生 `peer_connected` 早于 MultiplayerAPI 的名单刷新，
+  此时 `rpc_id` 会被引擎拒绝（`Attempt to call RPC with unknown peer ID`）。
+  → 广播必须推迟（`call_deferred`）或改走 MultiplayerAPI 层的 peer 事件。
+- **真实联机链必须有自动化覆盖**：headless 单进程里两个 peer 无法共用同一个 `MultiplayerAPI`，
+  用测试自己伪造的"投递层"会掩盖真实缺陷（Task 7 审查已实证）。
+  → P1 必须有**双进程真实 RPC 测试**（同一条 `tools/test_*.gd` 内用 `OS.execute` 拉起两个真 Godot 进程，
+  走真实的 `rpc_id` 投递），否则 Task 13 手动验收会反复踩同一批坑。
+
 
 
 
