@@ -183,7 +183,18 @@ environment/defaults/default_clear_color=Color(0.07, 0.08, 0.12, 1)
 
 > `default_texture_filter=1` 是 Linear。手绘风不用 Nearest。
 
-`icon.svg`：一个 128×128 的深蓝底 + 黄色小灯笼 SVG。
+`icon.svg`（128×128，深蓝底 + 一盏黄灯笼）：
+
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect width="128" height="128" fill="#131722"/>
+  <rect x="46" y="20" width="36" height="8" fill="#6b5a2e"/>
+  <rect x="50" y="28" width="28" height="52" rx="6" fill="#f5d67a" stroke="#8a6f2c" stroke-width="4"/>
+  <rect x="46" y="80" width="36" height="8" fill="#6b5a2e"/>
+  <circle cx="64" cy="52" r="9" fill="#fff3c4"/>
+  <rect x="62" y="6" width="4" height="14" fill="#8a6f2c"/>
+</svg>
+```
 
 `scenes/main.tscn`：
 
