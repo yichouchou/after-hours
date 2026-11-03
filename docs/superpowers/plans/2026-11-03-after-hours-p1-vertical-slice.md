@@ -138,6 +138,26 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
   规则：守卫 5 格（160 px）内每有一盏**熄灭**的路灯 → `light_factor *= 0.6`。
 - **`scripts/net/game_rpc.gd` 由 Task 9 创建**（计划里 Task 11 引用了它，却没有任何任务创建 → 计划有洞）；
   Task 10 在同一文件追加 `submit_mischief` / `resolve_mischief`。
+- **★ Task 9 已落地并锁定（commit `1f9a33e`，Task 10/11 必须逐字对齐）**：
+  - `GuardBrain.begin_carry()` **无参**、`finish_carry()`、
+    `static func compute_light_factor(guard_pos: Vector2, lamps: Array, radius: float) -> float`
+    （灯的字典形状 `{"position": Vector2, "on": bool}`）。
+  - `scripts/guard.gd` 的依赖**全部靠注入**：`set_player_root()` / `set_lamp_root()` /
+    `set_lamps()` / `set_rpc()` —— **不硬编码场景路径**。
+  - `@export var guard_id: StringName`（数据 id）与 `@export var guard_wire_id: int`（**网络寻址编号**）
+    是**两个东西**；RPC 线上传的是 `guard_wire_id`。
+  - **★ 灯的亮灭契约**：优先级 = **meta `"lamp_on"` → 属性 `lamp_on` → 都没有就当亮着**。
+    Task 10 负责真正把灯弄灭，**必须走这个契约**，不许自创读取方式。
+  - **`guard_state` 的广播绝不能回写 `brain.state`**（实现者踩过：房主自己的广播用陈旧的 `st` 覆盖状态机）。
+  - **实测引擎语义**：`call_local` 的 `.rpc()` **本地也执行**、`call_remote` 本地不执行
+    → **房主自己被抓时必须本地投递**，否则押送卡死。
+  - `player.gd`：`var spawn_position` + `set_spawn_position()`（**Task 11 分配「每人固定位置」**）、
+    `var escorted`（被押送中）、`const ESCORT_ARRIVE_TOLERANCE := 8.0`、
+    `signal escort_finished(peer_id)`、`set_rpc()`（不硬编码路径）。
+  - 三个 RPC 签名与设计 §5.3 **逐字一致**：`player_caught(peer_id, guard_id)` /
+    `guard_state(guard_id, state, position, target_peer)` / `escort_finished(peer_id)`。
+    **Task 10 只许追加 `submit_mischief` / `resolve_mischief`，不许动这三个。**
+
 
 **Task 10（捣蛋交互与裁决）**
 
