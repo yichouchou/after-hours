@@ -1,0 +1,14 @@
+[
+  {
+    "id": "old_chen",
+    "name": "老陈",
+    "sight_range": 96,
+    "sight_angle_deg": 80,
+    "hearing_range": 128,
+    "lines": {
+      "spotted": ["哎哎哎！那边谁啊？", "谁在那儿？"],
+      "caught": ["我的萝卜呢？！", "又是你！"],
+      "missing": ["我的萝卜去哪了……"]
+    }
+  }
+]
