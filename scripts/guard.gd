@@ -175,7 +175,9 @@ func _light_factor() -> float:
 
 ## 灯列表：[{ "position": Vector2, "on": bool }]。
 ## 来源 = 直接注入的数组 + lamp_root 下的子节点。
-## 灯是否亮着：节点上的 lamp_on 属性（没有就看 meta "lamp_on"，都没有就当亮着）。
+## 灯是否亮着：**先看 meta "lamp_on"**，没有再看节点上的 lamp_on 属性，都没有就当亮着。
+## （★ 顺序不能反：Task 9/10 定的**唯一**写入入口是 Interaction.set_lamp_on()，
+##   它只写 meta "lamp_on"；属性那条是兼容老写法的兜底。）
 func _lamp_states() -> Array:
 	var out: Array = []
 	out.append_array(_injected_lamps)

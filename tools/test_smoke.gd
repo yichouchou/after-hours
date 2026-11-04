@@ -731,7 +731,7 @@ func _double_process_part() -> void:
 	var client_first_enter := int(client_enter[0]) if client_enter.size() > 0 else -1
 	_fails += _check(host_round_ms > 0 and host_enter.size() == 2
 			and host_first_enter > host_round_ms,
-		"[D48] 房主侧：玩家的进树时刻**晚于**回合开始时刻（回合 %d ms → 进树 %d ms）——证明房主不是立刻生成自己的"
+		"[D48] 房主侧：玩家的进树时刻**晚于**回合开始时刻（回合 %d ms → 进树 %d ms）——这一条两段式也满足；**真正的不变量是 [D46]（两端进树时刻差）**"
 		% [host_round_ms, host_first_enter])
 	_fails += _check(client_round_ms > 0 and client_enter.size() == 2
 			and client_first_enter > client_round_ms,
