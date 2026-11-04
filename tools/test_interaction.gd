@@ -674,8 +674,18 @@ func _boot() -> void:
 		"[§4-25] 能取到 submit_mischief 的方法块")
 	_fails += _check(re_ok == OK and re_progress.search(submit_text) != null,
 		"[§4-25] submit_mischief 的 adjudicate() **第 4 个实参是字面量 1.0**")
-	_fails += _check(not submit_text.contains("0.5"),
-		"[§4-25] submit_mischief 的方法体里**不出现 0.5**")
+	# ★ 只扫「**代码部分**」：先把注释剥掉（修复轮 2 Important 2）——
+	#   否则生产代码**一个字没改**、只在方法体里加一句提到 0.5 的说明性注释 → 测试**假红**。
+	var submit_code := _strip_comments(submit_text)
+	_fails += _check(not submit_code.contains("0.5"),
+		"[§4-25] submit_mischief 方法体的**代码部分**里不出现 0.5（注释不算）")
+	# ★ §4-28：把「剥注释」这件事本身钉死（helper 改坏 → 又假红）。
+	_fails += _check(not _strip_comments("var a = 1  # 进度阈值曾经写成 0.5").contains("0.5"),
+		"[§4-28] 剥注释：**行尾注释**里的 0.5 不算进代码部分")
+	_fails += _check(not _strip_comments("# 0.5\nvar b = 2").contains("0.5"),
+		"[§4-28] 剥注释：**整行注释**里的 0.5 不算进代码部分")
+	_fails += _check(_strip_comments("var s = \"# 0.5\"").contains("0.5"),
+		"[§4-28] 剥注释：**字符串字面量**里的 # 不是注释起点（其中的 0.5 仍算代码）")
 
 	# ==================================================================
 	# [§4-26] ★★ 房主**不许写**远端玩家的进度（行为断言，不是文本代理）
@@ -692,13 +702,26 @@ func _boot() -> void:
 	var remote_player = null
 	if player_packed != null:
 		remote_player = player_packed.instantiate()
-		remote_player.name = "007"
+		# ★ 节点名 = peer id（生产口径：scripts/player.gd 的 resolve_authority()）。
+		#   必须叫 "7"：下面裁决的 peer 就是 7 → 严格解析器必须能把它解析成 **7**。
+		#   （曾叫 "007" → 严格解析器兜底成 1 → 房主按**生产口径**根本找不到这个节点
+		#    → 一次都不写 → §4-26 的断言**恒真** → 整族漏网。修复轮 2 Important 1。）
+		remote_player.name = "7"
 		remote_player.position = Vector2(600, 600)
 		remote_root.add_child(remote_player)
 		remote_player.set_physics_process(false)
 		await process_frame
 	_fails += _check(remote_player != null,
 		"[§4-26] 前提：造得出一个**真的 Player 实例**当远端玩家")
+	# ★ §4-27：把「假远端玩家的身份」钉死 —— 这是 §4-26 **成立的前提**。
+	#   断言：它的节点名能被**严格解析器**（生产口径）解析成**被裁决的那个 peer id**。
+	#   不钉这一条 → 下次有人把节点名改回 "007" → 房主找不到节点 → §4-26 又静默恒真。
+	var remote_peer_strict := -1
+	if remote_player != null:
+		remote_peer_strict = int(PlayerScript.resolve_authority(str(remote_player.name)))
+	_fails += _check(remote_peer_strict == 7 and remote_peer_strict != 1,
+		"[§4-27] 前提：假远端玩家的节点名能被**严格解析器**解析成被裁决的 peer id 7（实际 %d；≠ 1 = 不被兜底成房主）"
+		% remote_peer_strict)
 	var saved_players_root26 = rpc.players_root
 	rpc.players_root = remote_root
 	var verdict26 := rpc.adjudicate(7, &"steal_carrot", 43, 1.0)
@@ -851,6 +874,63 @@ func _method_block(src: String, name: String) -> Array:
 		out.append(raw)
 	while out.size() > 0 and str(out[out.size() - 1]).strip_edges().is_empty():
 		out.pop_back()
+	return out
+
+
+## 把源码里的**注释**剥掉，只留**代码部分**。
+##
+## ★ 为什么需要（Task 10 修复轮 2 Important 2）：
+##   「方法体里不出现某个字面量」这类**裸子串扫描**会把注释一起扫进去
+##   → 生产代码**一个字没改**、只在方法体里加一句提到该字面量的说明性注释
+##   → 测试**假红**（行为完全没变却被判红）。
+##
+## 规则：
+##   * `#` 到行尾是注释（**整行注释**与**行尾注释**都剥掉）；
+##   * **字符串字面量里的 `#` 不是注释起点**（否则会误删真正的代码）；
+##   * 支持 "..." / '...' / """...""" 三种引号与反斜杠转义。
+func _strip_comments(src: String) -> String:
+	var out := ""
+	var i := 0
+	var n := src.length()
+	while i < n:
+		var ch := src[i]
+		if ch == "\n":
+			out += ch
+			i += 1
+			continue
+		if ch == "#":
+			while i < n and src[i] != "\n":
+				i += 1
+			continue
+		if ch == "\"" or ch == "'":
+			var quote := ch
+			var triple := false
+			if i + 2 < n and src[i + 1] == quote and src[i + 2] == quote:
+				triple = true
+			var q := quote
+			if triple:
+				q = quote + quote + quote
+			out += q
+			i += q.length()
+			while i < n:
+				var c2 := src[i]
+				if c2 == "\\" and i + 1 < n:
+					out += c2 + src[i + 1]
+					i += 2
+					continue
+				out += c2
+				i += 1
+				if c2 != quote:
+					continue
+				if not triple:
+					break
+				if i + 1 < n and src[i] == quote and src[i + 1] == quote:
+					out += src[i] + src[i + 1]
+					i += 2
+					break
+			continue
+		out += ch
+		i += 1
 	return out
 
 
