@@ -66,6 +66,18 @@ var rpc: Node = null
 
 var brain: GuardBrain = GuardBrain.new()
 
+## 朝向（弧度，0 = 朝右）。
+##
+## ★ 为什么不直接用节点的 rotation：
+##   节点一旋转，贴图连同 offset(-32,-64) 一起转 →
+##   人物会**绕着自己的脚底翻过去**（侧躺着，像具尸体；
+##   2026-11-04 用户截图里的老陈就是这个样子）。
+##   而且客户端那个守卫靠广播更新位置、**根本不转** → 两端长得都不一样。
+##   → 节点永远不转，朝向单独记在这儿；视野锥照旧用它算。
+## ★ 将来换成真美术（角色有左右朝向）时，在这里加「朝左就水平翻转贴图」即可，
+##   仍然不要去转节点。
+var facing_angle: float = 0.0
+
 var _home := Vector2.ZERO
 var _patrol_angle := 0.0
 var _patrol_point_index := 0
@@ -134,7 +146,7 @@ func _physics_process(delta: float) -> void:
 ## 找不到玩家就返回安全的空快照。
 func _sense_context() -> Dictionary:
 	var light := _light_factor()
-	var facing := Vector2.RIGHT.rotated(rotation)
+	var facing := Vector2.RIGHT.rotated(facing_angle)
 	var sight_now := GuardBrain.effective_sight_range(sight_range, light)
 	var nearest := 99999.0
 	var visible := false
@@ -284,7 +296,7 @@ func _follow_carried(delta: float) -> void:
 ## 走回岗位。到了就把状态切回巡逻。
 func _walk_home(delta: float) -> void:
 	_move_towards(_home, delta)
-	rotation = lerp_angle(rotation, (_home - global_position).angle(), 4.0 * delta)
+	_face_towards(_home, delta)
 	if global_position.distance_to(_home) <= HOME_TOLERANCE:
 		_returning_home = false
 		brain.state = GuardBrain.State.PATROL
@@ -297,14 +309,22 @@ func _patrol(delta: float) -> void:
 		_patrol_point_index = posmod(_patrol_point_index, count)
 		var target: Vector2 = patrol_points[_patrol_point_index]
 		_move_towards(target, delta)
-		rotation = lerp_angle(rotation, (target - global_position).angle(), 4.0 * delta)
+		_face_towards(target, delta)
 		if global_position.distance_to(target) <= PATROL_POINT_TOLERANCE:
 			_patrol_point_index = (_patrol_point_index + 1) % count
 		return
 	_patrol_angle += delta * 0.35
 	var target := _home + Vector2(cos(_patrol_angle), sin(_patrol_angle * 0.7)) * patrol_radius
 	_move_towards(target, delta)
-	rotation = lerp_angle(rotation, (target - global_position).angle(), 4.0 * delta)
+	_face_towards(target, delta)
+
+
+## 把朝向转向某个目标（平滑）。
+##
+## ★ 只改 facing_angle，**绝不改节点的 rotation** ——
+##   节点一转，贴图连同 offset 一起转，人物就绕着脚底翻倒了（见 facing_angle 的说明）。
+func _face_towards(target: Vector2, delta: float) -> void:
+	facing_angle = lerp_angle(facing_angle, (target - global_position).angle(), 4.0 * delta)
 
 
 ## 往目标点走。

@@ -564,6 +564,57 @@ func _boot() -> void:
 		+ "　豁免后实扫到 %d 处" % probe_allowed.size())
 
 	# ==================================================================
+	# [GF-1] 守卫巡逻时**不许旋转整个节点** —— 否则人物绕着脚底翻倒
+	#
+	# 现象（2026-11-04 用户截图）：守卫老陈侧躺在地上，像具尸体。
+	# 根因：guard.gd 用 `rotation = lerp_angle(rotation, 移动方向, ...)`
+	#       直接转**节点** → 贴图连同 offset(-32,-64) 一起转 →
+	#       人物绕着自己的脚底翻过去。
+	#       （而且客户端那个守卫靠广播更新位置、根本不转 → 两端长得不一样。）
+	# 修法：朝向改用独立字段（视野锥照旧用它），节点永远不转。
+	#
+	# ★ 断言盯的是**可观测的后果**（人物直立），不是实现细节：
+	#   * 节点 rotation 保持 0
+	#   * 贴图 global_rotation 保持 0（直立）
+	#   * 巡逻照旧在动（不能为了不翻倒把 AI 停了）
+	#   * 朝向仍然跟着走动方向变（视野锥不能失效）
+	# ==================================================================
+	var up_guard = null
+	if guard_packed != null:
+		up_guard = guard_packed.instantiate()
+		up_guard.position = Vector2(400, 300)
+		root.add_child(up_guard)
+		await process_frame
+		# 手动驱动（与本文件的巡逻用例同款：不让引擎自动跑，避免时序不确定）。
+		# ★ 必须在 _ready() **之后**关：_ready() 里有一句 set_physics_process(...)，
+		#   先关后开等于没关 → 引擎会跟手动驱动叠着跑（实测位移会差出 3 倍）。
+		up_guard.set_physics_process(false)
+		var up_before: Vector2 = up_guard.position
+		var up_sprite = up_guard.get_node_or_null("Sprite2D")
+		var up_facing_first := Vector2.ZERO
+		for i in 120:
+			up_guard.call("_physics_process", 1.0 / 60.0)
+			if i == 30:
+				up_facing_first = up_guard._sense_context()["guard_facing"]
+		var up_facing_last: Vector2 = up_guard._sense_context()["guard_facing"]
+		var up_moved: float = up_guard.position.distance_to(up_before)
+		_fails += _check(up_moved > 1.0,
+			"[GF-1] 巡逻照旧在动（位移 %.2f px）—— 不能为了不翻倒把 AI 停了" % up_moved)
+		_fails += _check(absf(up_guard.rotation) < 0.01,
+			"[GF-1] ★守卫节点**不旋转**（rotation = %.4f）—— 人物不会绕着脚底翻倒"
+			% up_guard.rotation)
+		if up_sprite != null:
+			_fails += _check(absf(up_sprite.global_rotation) < 0.01,
+				"[GF-1] ★贴图保持直立（global_rotation = %.4f）" % up_sprite.global_rotation)
+		else:
+			_fails += _check(false, "[GF-1] 守卫带 Sprite2D")
+		var up_turn: float = absf(up_facing_first.angle_to(up_facing_last))
+		_fails += _check(up_turn > 0.05,
+			"[GF-1] 朝向仍然跟着走动方向变（转了 %.4f 弧度）—— 视野锥没失效" % up_turn)
+		up_guard.queue_free()
+		await process_frame
+
+	# ==================================================================
 	# 收尾：释放实例
 	# ==================================================================
 	if player != null:
