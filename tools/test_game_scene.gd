@@ -9,6 +9,10 @@ extends SceneTree
 ##   [§4-20] 出生点**不与任何道具点重合**（派单 §2.8 的明文约束，此前无断言）
 ##   [§4-21] 守卫编号**不是写死的默认值**（静态兜底 + 行为可区分判定）
 ##   [§4-22] 两端对局场景路径一致（派单 §2.5，此前无断言）
+##
+## ★ 修复轮 2（task-11-fix2-brief.md）新增 1 组断言：
+##   [§4-23] 派单 §2.8 的「6 个出生点」**全部**校验
+##            （[§4-20] 只覆盖了本轮实际生成的那几个出生点）
 
 const GAME_SCENE := "res://scenes/game.tscn"
 const HUD_SCENE := "res://scenes/ui/hud.tscn"
@@ -591,6 +595,65 @@ func _boot() -> void:
 				spawn_on_prop.append("出生点 %s 与道具点 %s 重合" % [str(p), str(pp)])
 	_fails += _check(spawn_on_prop.is_empty(),
 		"[§4-20] 没有出生点与任何道具点重合（派单 §2.8）%s" % _first(spawn_on_prop))
+
+	# ==================================================================
+	# [§4-23] ★ 派单 §2.8 的「6 个出生点」**全部**校验（修复轮 2 Important I-1）
+	# ==================================================================
+	# ★ 病根：上面 [§4-20] 比对的 `positions` 来自 players_root.get_children()，
+	#   而本轮夹具**只实际生成**了 3 个玩家 → 派单 §2.8 写死的 6 个出生点里，
+	#   index 3 / 4 / 5（格坐标 (3,5) / (5,10) / (7,9)）**从没进过任何一次比对**。
+	#   变异 T5（生产表第 4 项 (3,5) → (4,4)，即 data/map.json 的 carrot 道具点）
+	#   就是这么全绿漏过去的。
+	# ★ 覆盖面分工（两条断言**不互为完全蕴含**）：
+	#   [§4-20] → 只管本轮**实际生成**的那些出生点（已生成的玩家被写错 → 它会红）；
+	#   [§4-23] → 管**整张 6 项表**（没被生成的表项落到道具点上 → 它会红）。
+	# ★ 期望值一律来自**测试自己那份 6 项字面量表** TEST_SPAWN_TILES；
+	#   生产侧的 PLAYER_SPAWN_TILES 在这里只当**被测对象**（actual），不当期望值
+	#   （拿生产常量算期望值 = 自证 = 恒真）。
+	var prod_tiles: Array = []
+	var prod_tiles_read := false
+	var game_script: GDScript = load(GAME_SRC) as GDScript
+	if game_script != null:
+		var const_map: Dictionary = game_script.get_script_constant_map()
+		var raw_tiles: Variant = const_map.get("PLAYER_SPAWN_TILES", null)
+		if raw_tiles is Array:
+			prod_tiles = (raw_tiles as Array).duplicate()
+			prod_tiles_read = true
+	# ★ 前提不许恒真：生产表读不到 / 项数不对 → 直接判失败，
+	#   绝不「比较集合为空 → 整体通过」。
+	_fails += _check(prod_tiles_read and prod_tiles.size() == TEST_SPAWN_TILES.size(),
+		"[§4-23] 前提：生产侧出生点表 PLAYER_SPAWN_TILES 读得到且恰好 6 项（读到 %d 项）"
+		% prod_tiles.size())
+	var tile_mismatch: Array = []
+	for i in mini(prod_tiles.size(), TEST_SPAWN_TILES.size()):
+		if Vector2(prod_tiles[i]) != Vector2(TEST_SPAWN_TILES[i]):
+			tile_mismatch.append("index %d：生产 %s != 规格 %s"
+				% [i, str(prod_tiles[i]), str(TEST_SPAWN_TILES[i])])
+	_fails += _check(prod_tiles.size() == TEST_SPAWN_TILES.size() and tile_mismatch.is_empty(),
+		"[§4-23] 生产侧 6 个出生点逐项 == 测试自己那份 6 项字面量表（派单 §2.8）%s"
+		% _first(tile_mismatch))
+	var prod_on_prop: Array = []
+	for i in prod_tiles.size():
+		var prod_px := Vector2(prod_tiles[i]) * float(WorldMap.TILE)
+		for pp in prop_points_px:
+			if is_equal_approx(prod_px.x, Vector2(pp).x) \
+					and is_equal_approx(prod_px.y, Vector2(pp).y):
+				prod_on_prop.append("生产出生点 index %d (%s) 与道具点 %s 重合"
+					% [i, str(prod_px), str(pp)])
+	_fails += _check(prod_on_prop.is_empty(),
+		"[§4-23] 生产侧 6 个出生点逐个都不与任何道具点重合（派单 §2.8）%s"
+		% _first(prod_on_prop))
+	var spec_on_prop: Array = []
+	for i in TEST_SPAWN_TILES.size():
+		var spec_px := Vector2(TEST_SPAWN_TILES[i]) * float(WorldMap.TILE)
+		for pp in prop_points_px:
+			if is_equal_approx(spec_px.x, Vector2(pp).x) \
+					and is_equal_approx(spec_px.y, Vector2(pp).y):
+				spec_on_prop.append("规格出生点 index %d (%s) 与道具点 %s 重合"
+					% [i, str(spec_px), str(pp)])
+	_fails += _check(spec_on_prop.is_empty(),
+		"[§4-23] 测试自己那份 6 项字面量出生点也都不与任何道具点重合（派单 §2.8）%s"
+		% _first(spec_on_prop))
 
 	# ==================================================================
 	# [§4-22] ★ 两端对局场景路径一致（派单 §2.5）
