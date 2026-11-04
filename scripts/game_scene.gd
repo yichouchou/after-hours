@@ -45,14 +45,24 @@ const ResultScreen := preload("res://scripts/ui/result_screen.gd")
 ## 玩家脚本（结算时按节点名解析 peer id）。
 const PlayerScript := preload("res://scripts/player.gd")
 
-## ★ 缺口 C（Task 12 实测钉死）：远端玩家的**生成要等一小会儿**。
+## ★ 缺口 C（Task 12 实测钉死）：**远端**玩家的**生成要等一小会儿**。
 ##
 ## MultiplayerSpawner 的生成消息只发给**当时在树里**的 spawner：
 ## 客户端收到清单 → 切进 game.tscn → 它的 MultiplayerSpawner 这才进树。
 ## 房主若在客户端进场景之前就 spawn()，那条消息**没人接**
 ## （引擎没有「晚加入补发」的承诺）→ 客户端永远没有自己的玩家节点。
-## → 场上真的有多人时，房主**等 REMOTE_SPAWN_DELAY_SEC 秒**再生成，
+## → 场上真的有多人时，房主**等 REMOTE_SPAWN_DELAY_SEC 秒**再生成**远端**玩家，
 ##   给客户端留出「收到清单 → 切场景 → spawner 进树」的时间。
+##
+## ★★ 只延迟**远端**玩家；**房主自己的玩家立刻出现**
+##   （Task 12 修复轮 1 · Important I-2）：
+##   修复前是整个名单（含房主自己）一起等 → 房主自己的玩家被拖了 ~1.07 秒
+##   （复审实测：peer_count()==2 时，房主自己的节点 1072 ms 才出现）。
+##   房主的输入延迟是这一局的第一帧 → **不许**被别人的等待拖住。
+##
+## ★ 这个远端延迟是**跨进程竞态的保守加固**，**不是**「修了一个已证实的 bug」：
+##   复审实测「完全去掉这个延迟」连跑 7 次全绿 → 当前时序下那条消息并不会真的丢。
+##   保留它是为了给更慢的机器 / 更满的网络留余量；它现在**只影响远端玩家**。
 const REMOTE_SPAWN_DELAY_SEC := 1.2
 
 ## 地面贴图（256×256 的草地，用 region + repeat 平铺成整张地图）。
@@ -211,17 +221,25 @@ func _build_guards() -> void:
 
 ## ── 玩家生成（房主权威）────────────────────────────────────────────────
 
-## 房主：生成玩家。
+## 房主：生成玩家（**分两步**：先自己，后远端）。
 ##
-## ★ 缺口 C（Task 12）：**真的有多人在线时**先等一小会儿再生成 ——
+## ★ 缺口 C（Task 12）：**真的有多人在线时**，**远端**玩家的生成要等一小会儿 ——
 ##   客户端的 MultiplayerSpawner 必须在树里才接得住生成消息。
 ##   没有别的玩家时没什么可等 → 立刻生成（本地模拟 / 单元测试不受影响）。
+##
+## ★★ 修复轮 1（Important I-2）：**房主自己的玩家立刻出现**（第 ① 步，**不等**任何人）。
+##   修复前是整个名单（含房主自己）一起等 → 房主自己的玩家被拖了 ~1.07 秒
+##   （复审实测：peer_count()==2 时，房主自己的节点 1072 ms 才出现）。
+##   房主的输入延迟是这一局的第一帧 → **不许**被别人的等待拖住。
 func _spawn_players_when_clients_ready() -> void:
+	# ① 房主自己：立刻生成（不等任何人）。
+	_spawn_roster_players(true)
 	if _should_wait_for_clients():
 		await get_tree().create_timer(REMOTE_SPAWN_DELAY_SEC).timeout
 		if not is_inside_tree():
 			return
-	_spawn_players()
+	# ② 远端玩家：给客户端留出「收到清单 → 切场景 → spawner 进树」的时间。
+	_spawn_roster_players(false)
 
 
 ## 场上是不是真的有别的玩家（要等他们进场景）。
@@ -235,10 +253,18 @@ func _should_wait_for_clients() -> bool:
 
 
 ## 房主：按出场顺序给名单里的每个人分配**稳定的 0–5 序号**并生成玩家。
-func _spawn_players() -> void:
+##
+## ★ local_only = true → 只生成**房主自己**（立刻）；
+##   false → 只生成**远端**玩家（等一小会儿之后）。
+## ★ 序号 index 一律取**当前名单里的位置** → 分两步生成不会把序号打乱
+##   （先自己后远端，序号仍与名单顺序一致 → 两端出生点必然一致）。
+func _spawn_roster_players(local_only: bool) -> void:
 	var roster := _roster()
 	for i in roster.size():
-		_spawn_player(int(roster[i]), i)
+		var peer_id := int(roster[i])
+		if (peer_id == _local_peer_id) != local_only:
+			continue
+		_spawn_player(peer_id, i)
 
 
 ## 房主名单（房主权威）。拿不到就退化成「只有自己」。
