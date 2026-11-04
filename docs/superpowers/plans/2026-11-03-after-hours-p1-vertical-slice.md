@@ -138,7 +138,7 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
   规则：守卫 5 格（160 px）内每有一盏**熄灭**的路灯 → `light_factor *= 0.6`。
 - **`scripts/net/game_rpc.gd` 由 Task 9 创建**（计划里 Task 11 引用了它，却没有任何任务创建 → 计划有洞）；
   Task 10 在同一文件追加 `submit_mischief` / `resolve_mischief`。
-- **★ Task 9 已落地并锁定（commit `1f9a33e`，Task 10/11 必须逐字对齐）**：
+- **★ Task 9 已落地并锁定（commit `c74dcf2`，Task 10/11 必须逐字对齐）**：
   - `GuardBrain.begin_carry()` **无参**、`finish_carry()`、
     `static func compute_light_factor(guard_pos: Vector2, lamps: Array, radius: float) -> float`
     （灯的字典形状 `{"position": Vector2, "on": bool}`）。
@@ -243,7 +243,7 @@ Task 3 的任务书自身存在三处矛盾（自带实现与自带测试互斥�
 
 **Task 10 交付的契约（Task 11 / 12 必须逐字对齐）**
 
-> 来源：Task 10 实现 commit `8d04a01` + 修复轮 1 commit `9b4b164`（2026-11-04）。
+> 来源：Task 10 实现 commit `f928226` + 修复轮 1 commit `dbe8a4e`（2026-11-04）。
 > 计划正文 Task 10 的 `game_rpc.gd` 参考实现有 5 处错，见下面每条。
 
 - **`behavior_id` 必须真的进广播载荷，且载荷恰好 4 个字段**
