@@ -195,7 +195,7 @@ func _on_mischief_resolved_evt(peer_id: int, behavior_id: StringName, success: b
 
 
 func _physics_process(delta: float) -> void:
-	if not is_multiplayer_authority():
+	if not _owns_movement():
 		# 非拥有者：位置由同步器提供，只做表现（不写自己的 position / velocity）
 		_bob += delta * 8.0
 		sprite.position.y = -absf(sin(_bob)) * 2.0
@@ -227,6 +227,19 @@ func _physics_process(delta: float) -> void:
 		_bob = 0.0
 		sprite.position.y = 0.0
 		sprite.scale = Vector2.ONE
+
+
+## 本机是不是这个节点的「移动权威」（输入归谁算）。
+##
+## ★ **不能**直接用 is_multiplayer_authority()：它内部会问
+##   multiplayer.get_unique_id()，而**一旦 mp 上没有 peer**，引擎就会每帧打一条
+##   ERROR（"No multiplayer peer is assigned. Unable to get unique ID."），
+##   而且返回值恒为 false → **输入被整个忽略（角色卡住）**
+##   （2026-11-04 用户报障，headless 探针复现）。
+## ★ PeerState 的口径：没有 peer ⇒ 本机即房主（peer id 1）
+##   → 权威为 1 的那个化身仍然归本机管，角色照样能动。
+func _owns_movement() -> bool:
+	return PeerState.owns_node(self)
 
 
 ## 被押送时的移动方向：朝**自己的**出生点。

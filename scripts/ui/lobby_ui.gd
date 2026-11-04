@@ -45,6 +45,23 @@ func _ready() -> void:
 	_start_btn.pressed.connect(_on_start)
 	_connect_session_signals()
 	_refresh()
+	# ★ 上一次连接失败/超时的原因（可能是在对局场景里断的，这会儿才回到大厅）。
+	_show_failure_reason()
+
+
+## 把「上一次为什么断了」说清楚（连接超时 / 房主掉线）。
+##
+## ★ 为什么要有这一步：连接断了之后玩家只看到「房间没了」却不知道为什么
+##   （2026-11-04 用户报障）。大厅是唯一能说清楚的地方。
+func _show_failure_reason() -> void:
+	if _session == null:
+		return
+	if not _session.has_method(&"failure_reason"):
+		return
+	var reason := str(_session.call(&"failure_reason"))
+	if reason.is_empty():
+		return
+	_status.text = reason
 
 
 ## 接 Session 的信号（**针对当前的 self._session**）。
@@ -62,6 +79,10 @@ func _connect_session_signals() -> void:
 		return
 	if not _session.roster_changed.is_connected(_on_roster):
 		_session.roster_changed.connect(_on_roster)
+	# ★ 连接断了 → 状态栏说清楚为什么（2026-11-04 用户报障）。
+	if _session.has_signal(&"connection_lost") \
+			and not _session.connection_lost.is_connected(_on_connection_lost):
+		_session.connection_lost.connect(_on_connection_lost)
 	# ★ 切场景**由 round_started 驱动**（两端对称）。
 	#   房主点「开始」→ start_round() → round_started（同步）；
 	#   客户端收到定向清单 → _apply_deal() → round_started。
@@ -78,6 +99,16 @@ func _disconnect_session_signals(s: Session) -> void:
 		s.disconnect(&"roster_changed", _on_roster)
 	if s.is_connected(&"round_started", _on_round_started):
 		s.disconnect(&"round_started", _on_round_started)
+	if s.is_connected(&"connection_lost", _on_connection_lost):
+		s.disconnect(&"connection_lost", _on_connection_lost)
+
+
+## Session 报告「连接断了」→ 状态栏说清楚原因。
+func _on_connection_lost(reason: String) -> void:
+	_refresh()
+	if reason.is_empty():
+		return
+	_status.text = reason
 
 
 func _on_host() -> void:

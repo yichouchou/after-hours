@@ -39,6 +39,9 @@ const GUARD_SCENE := preload("res://scenes/guard.tscn")
 ## 结算页（天亮结算）。
 const RESULT_SCENE := "res://scenes/result.tscn"
 
+## 大厅场景（连接断了 → 回大厅）。
+const LOBBY_SCENE := "res://scenes/lobby.tscn"
+
 ## 结算页脚本（静态变量用来跨场景递结算载荷）。
 const ResultScreen := preload("res://scripts/ui/result_screen.gd")
 
@@ -112,6 +115,8 @@ var _peer_index: Dictionary = {}
 ##
 ## ★ 缓存的理由：MultiplayerAPI.get_unique_id() 在 peer 被关闭之后会打引擎 ERROR
 ##   （"The multiplayer instance isn't currently active."）—— 每帧问一次会刷一屏错误。
+## ★ 取值走 PeerState.local_peer_id()：mp 上没有 peer 时它返回 1
+##   （引擎默认口径：本机即房主），而不是让 get_unique_id() 打 ERROR。
 var _local_peer_id: int = 0
 
 ## 每个 peer 被抓的次数（结算用；纯数据，跨进程可传）。
@@ -122,7 +127,7 @@ var _done_titles: Dictionary = {}
 
 
 func _ready() -> void:
-	_local_peer_id = multiplayer.get_unique_id()
+	_local_peer_id = PeerState.local_peer_id(multiplayer)
 	_resolve_session()
 	_configure_spawner()
 	_build_world()
@@ -131,7 +136,9 @@ func _ready() -> void:
 	_connect_hud_finish()
 	# 先接上 child_entered_tree，再生成玩家 —— 否则新节点不会被注入。
 	players_root.child_entered_tree.connect(_on_player_entered_tree)
-	if multiplayer.is_server():
+	# ★ 用 PeerState 而不是 multiplayer.is_server()：mp 上没有 peer 时
+	#   is_server() 会打引擎 ERROR（2026-11-04 用户报障）。
+	if PeerState.is_local_host(multiplayer):
 		_spawn_players_when_clients_ready()
 	for child in players_root.get_children():
 		_inject_player(child)
@@ -430,6 +437,9 @@ func _connect_session() -> void:
 	_connect_signal(session, &"round_started", Callable(self, "_on_round_started"))
 	# ── 回合结束（Task 12）：两端对称切到结算页 ──────────────────────────
 	_connect_signal(session, &"round_ended", Callable(self, "_on_round_ended"))
+	# ── 连接断了（超时兜底 / 房主掉线）→ 本局结束 → 回到大厅 ─────────────
+	#   ★ 零失败惩罚：只是这一局作废，玩家的进度与名次都不受影响。
+	_connect_signal(session, &"connection_lost", Callable(self, "_on_connection_lost"))
 
 
 ## 接信号（已接过就跳过，避免 "Signal already connected"）。
@@ -581,6 +591,28 @@ func _goto_result_scene() -> void:
 	if router == null:
 		return
 	router.call(&"goto", RESULT_SCENE)
+
+
+## 连接断了（连接超时兜底 / 房主掉线）→ 本局结束 → 回到大厅。
+##
+## ★ 为什么不在对局里「降级成单机继续玩」：
+##   对局是**多人**的一局，房主没了就没有裁决方（守卫 AI 与捣蛋结算都在房主跑），
+##   留在对局里只会让人对着一个冻住的世界发呆。
+##   → 回大厅、把原因说清楚（lobby_ui 显示 Session.failure_reason()），重新开一局。
+## ★ 零失败惩罚：这一局作废，玩家的进度与名次都不受影响。
+func _on_connection_lost(_reason: String) -> void:
+	_goto_lobby_scene()
+
+
+## 回到大厅（走 Router，缺失场景由 Router 安全跳过）。
+func _goto_lobby_scene() -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	var router = tree.root.get_node_or_null("Router")
+	if router == null:
+		return
+	router.call(&"goto", LOBBY_SCENE)
 
 
 ## 本机是不是房主（只有房主能收工）。

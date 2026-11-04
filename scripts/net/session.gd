@@ -102,6 +102,13 @@ signal roster_changed(peers: Array[int])
 signal round_started(deal: Array)
 signal round_ended(summary: Dictionary)
 
+## 房间 / 连接**断了**（连接超时兜底 / 房主掉线）。
+## 载荷是一句给玩家看的中文说明。
+##
+## ★ 为什么要有这个信号：连接断了之后界面必须**说清楚**，
+##   否则玩家只看到「房间没了」却不知道为什么（2026-11-04 用户报障）。
+signal connection_lost(reason: String)
+
 ## 默认端口。**28000**：不在 tools/port_alloc.gd 的保留段（27015–27024 /
 ## 27030–27034 / 27040 / 27041 / 27050）里，也不在测试候选池（27100–27299）里
 ## → 与并发跑的测试**不会撞**。P1 双窗口固定用这个端口（Task 13 验收清单里写明）。
@@ -114,6 +121,15 @@ const MAX_CLIENTS := 6
 ## 要 ~31.5 秒（4567 帧）才发 connection_failed —— 远超一次等待的预算，
 ## 所以 Session 自己带一个 Timer 兜底：超时后主动 close peer 并回到大厅态。
 const CONNECT_TIMEOUT_SEC := 8.0
+
+## 连接超时兜底的**实际**秒数（**可覆盖**）。
+##
+## ★ 生产一律用默认值（CONNECT_TIMEOUT_SEC）。
+##   它是给 headless 测试用的缝：8 秒在测试里太长（统一入口的帧预算只有 600 帧
+##   ≈ 4.3 秒），测试要把它缩到几百毫秒才能验证「超时之后房间还在不在」。
+##   （与 lobby_ui.gd 的 game_scene_path 同一个路子：常量保持不变，
+##     另开一个可覆盖的变量。）
+var connect_timeout_sec: float = CONNECT_TIMEOUT_SEC
 
 ## 出站台账上限（防止无限增长）。
 const OUTBOX_LIMIT := 128
@@ -148,11 +164,14 @@ var _pending: Array = []
 
 var _timeout_timer: Timer = null
 
+## 上一次连接失败 / 超时的原因（给界面显示用；空串 = 没有失败过）。
+var _last_failure_reason: String = ""
+
 
 func _ready() -> void:
 	_timeout_timer = Timer.new()
 	_timeout_timer.one_shot = true
-	_timeout_timer.wait_time = CONNECT_TIMEOUT_SEC
+	_timeout_timer.wait_time = connect_timeout_sec
 	_timeout_timer.timeout.connect(_on_connect_timeout)
 	add_child(_timeout_timer)
 
@@ -176,7 +195,19 @@ func set_available_tags(tags: Array[StringName]) -> void:
 ##
 ## **不启动连接超时计时器**：房主建房成功即视为链路已建立 ——
 ## server_connected 是客户端专用信号，房主永远等不到它（否则 8 秒后房主会把自己的房间拆掉）。
+##
+## ★★ **必须先停掉「加入房间」留下的连接超时计时器**（2026-11-04 用户报障）：
+##   用户的操作顺序常常是「加入房间」→「创建房间」。
+##   join_game() 给那次加入武装了 8 秒的连接超时兜底；
+##   如果建房不管它 → 8 秒后那个计时器触发 → _drop_transport()
+##   → **把刚建好的房间拆掉** → mp 上没了 peer →
+##     引擎每帧打一条 ERROR、get_unique_id() 返回 0
+##     → is_multiplayer_authority() 恒为 false → **角色卡住**。
+##   → 建房 = 换了一条路（「我当房主」），加入房间的尝试已经作废 → 计时器必须停。
 func host_game(port: int = DEFAULT_PORT) -> Error:
+	_stop_connect_timeout()
+	# 新的一次尝试 → 上一次失败的原因不再相关（大厅状态栏要跟着更新）。
+	_last_failure_reason = ""
 	_ensure_transport()
 	var err := _transport.host(port, MAX_CLIENTS)
 	if err != OK:
@@ -196,6 +227,8 @@ func host_game(port: int = DEFAULT_PORT) -> Error:
 ## **连接超时兜底只对客户端生效**：连不上时 8 秒后主动放弃并回到大厅态。
 func join_game(address: String, port: int = DEFAULT_PORT) -> Error:
 	_ensure_transport()
+	# 新的一次尝试 → 上一次失败的原因不再相关（大厅状态栏要跟着更新）。
+	_last_failure_reason = ""
 	var err := _transport.join(address, port)
 	if err != OK:
 		_drop_transport()
@@ -549,7 +582,12 @@ func _on_transport_server_connected() -> void:
 
 func _on_transport_connection_failed() -> void:
 	# 房主掉线 = 本局结束（不做 host migration）。
+	# ★ **不**在这里关 peer：这个回调是在 transport 的信号里（peer 自己的回调栈上），
+	#   在那里关 peer / 换绑 mp 有重入风险。peer 已经是死的
+	#   （get_unique_id() 仍返回旧 id、不打引擎 ERROR），留着不影响判定。
+	_last_failure_reason = "与房主的连接断了，已回到大厅"
 	_reset_to_lobby()
+	connection_lost.emit(_last_failure_reason)
 
 
 ## ------------------------------------------------------------------
@@ -558,7 +596,7 @@ func _on_transport_connection_failed() -> void:
 
 func _start_connect_timeout() -> void:
 	if _timeout_timer != null:
-		_timeout_timer.start(CONNECT_TIMEOUT_SEC)
+		_timeout_timer.start(connect_timeout_sec)
 
 
 func _stop_connect_timeout() -> void:
@@ -570,14 +608,29 @@ func _on_connect_timeout() -> void:
 	# ENet 的 connect timeout 不可配置，"连不上服务器"要 ~31.5 秒才报
 	# connection_failed —— 这里自己兜底：主动 close peer，回到大厅态。
 	push_warning("[Session] 连接超时，已放弃本次连接")
+	_last_failure_reason = "连接超时：没连上服务器，已回到大厅"
 	_drop_transport()
 	_reset_to_lobby()
+	connection_lost.emit(_last_failure_reason)
+
+
+## 上一次连接失败 / 超时的原因（给界面显示用；空串 = 没有失败过）。
+func failure_reason() -> String:
+	return _last_failure_reason
 
 
 ## 关闭并丢弃当前传输（超时兜底 / 开房失败时用）。
 ## Transport 层把 peer 生命周期收在它自己那一层（Task 6 契约），本文件不改它；
 ## 所以这里：先让 mp 松手，再 close 底层 peer，最后把 _transport 置空 ——
 ## Session 侧状态立刻自洽（is_host() == false / peer_count() == 0 / 清单为空）。
+##
+## ★★ **mp 上绝不留 null peer**（2026-11-04 用户报障）：
+##   mp.multiplayer_peer == null 时，引擎每帧打一条 ERROR
+##   （"No multiplayer peer is assigned. Unable to get unique ID."），
+##   get_unique_id() 返回 0 → is_multiplayer_authority() 恒为 false
+##   → **输入被整个忽略（角色卡住）**；is_server() 恒为 false → 守卫 AI 停摆。
+##   → 松手之后立刻挂回引擎自己的默认值（OfflineMultiplayerPeer：
+##     unique_id 1 / is_server true =「本机单机当房主」）。
 func _drop_transport() -> void:
 	if _transport != null:
 		var p := _transport.get_peer()
@@ -591,6 +644,8 @@ func _drop_transport() -> void:
 			if p.get_connection_status() != MultiplayerPeer.CONNECTION_DISCONNECTED:
 				p.close()
 	_transport = null
+	# ★ mp 上不留 null peer（见上面的说明）。
+	PeerState.restore_offline(multiplayer)
 
 
 ## 回到大厅态：清空名单与清单，并让界面能刷新。

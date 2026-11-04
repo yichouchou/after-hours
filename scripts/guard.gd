@@ -81,11 +81,14 @@ func _ready() -> void:
 	_home = global_position
 	_patrol_angle = randf() * TAU
 	# 只有房主跑 AI；客户端靠 guard_state 广播更新表现位置。
-	set_physics_process(multiplayer.is_server())
+	# ★ 用 PeerState 而不是 multiplayer.is_server()：mp 上没有 peer 时
+	#   is_server() 会打引擎 ERROR 并恒返回 false → 守卫 AI 整场停摆
+	#   （2026-11-04 用户报障）。
+	set_physics_process(PeerState.is_local_host(multiplayer))
 
 
 func _physics_process(delta: float) -> void:
-	if not multiplayer.is_server():
+	if not PeerState.is_local_host(multiplayer):
 		return
 
 	var st := brain.state

@@ -201,6 +201,12 @@ func _begin_swap() -> void:
 
 
 ## 退出替换：解除抑制 + 复位闩锁（替换完全结束后才复位）。
+##
+## ★ mp 在替换**失败**后会留着第 2 步解绑留下的 **null peer** ——
+##   这一层的契约是「mp 里不留残留连接」（mp 不再持有本层放弃的 peer），
+##   所以这里**不**动 mp：把 mp 恢复到「单机」是**上层**的事
+##   （scripts/net/session.gd 的 _drop_transport() → PeerState.restore_offline()），
+##   因为「玩家能动、守卫还在跑」是**对局层**的要求，不是传输层的。
 func _end_swap() -> void:
 	_suppress_peer_events = false
 	_reset_connection_latches()
