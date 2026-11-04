@@ -4,11 +4,17 @@ extends SceneTree
 ##
 ## 覆盖派单 §4 的 19 条断言（下面每段注释标了 [§4-N]）。
 ## 另加 3 处**反向自检**（[§4-11-R1/R2/R3]），证明关键断言不是恒真。
+##
+## ★ 修复轮 1（task-11-fix1-brief.md）新增 3 组断言：
+##   [§4-20] 出生点**不与任何道具点重合**（派单 §2.8 的明文约束，此前无断言）
+##   [§4-21] 守卫编号**不是写死的默认值**（静态兜底 + 行为可区分判定）
+##   [§4-22] 两端对局场景路径一致（派单 §2.5，此前无断言）
 
 const GAME_SCENE := "res://scenes/game.tscn"
 const HUD_SCENE := "res://scenes/ui/hud.tscn"
 const GAME_SRC := "res://scripts/game_scene.gd"
 const HUD_SRC := "res://scripts/ui/hud.gd"
+const LOBBY_UI_SRC := "res://scripts/ui/lobby_ui.gd"
 const PLAYER_SCENE_PATH := "res://scenes/player.tscn"
 const GUARD_SCENE_PATH := "res://scenes/guard.tscn"
 
@@ -76,7 +82,11 @@ func _boot() -> void:
 	var hand_a := _make_mischief(&"steal_carrot", "偷萝卜")
 	var hand_b := _make_mischief(&"move_chair", "搬椅子")
 	var fake := FakeSession.new()
-	fake.roster = [1]
+	# ★ 名单**必须 ≥ 2 人**（修复轮 1 Important 1）：
+	#   名单只有 1 人时，房主路径只会用到 index 0 →
+	#   spawn_position_for_index() 的 **index ≥ 1 分支从没被走过** →
+	#   把所有玩家都放到第 0 个出生点，测试照样全绿（变异 M5 漏网）。
+	fake.roster = [1, 2]
 	# 房主形状：deal() = **全员手牌**（每人一份），by_peer = peer id → 自己那一份
 	fake.hands = [[hand_a], [hand_b]]
 	fake.by_peer = {1: [hand_a]}
@@ -253,6 +263,37 @@ func _boot() -> void:
 			"[§4-17] game_scene.gd 没有把 guard_wire_id 写死成 1")
 
 	# ==================================================================
+	# [§4-21] ★ 守卫编号**不是写死的默认值**（修复轮 1 Important 2：断言强度）
+	# ==================================================================
+	# ① 静态兜底：源码的**代码部分**里必须出现**带限定前缀与调用括号**的形式
+	#    Interaction.assign_guard_wire_ids( —— 生产代码里那句**注释**没有这个形式
+	#    （注释写的是「assign_guard_wire_ids（……」）→ 注释满足不了这条，
+	#    「把真调用换成字面量 dict、注释留着」骗不过它（变异 M8b）。
+	var game_code := _strip_comments(game_src)
+	_fails += _check(game_code.contains("Interaction.assign_guard_wire_ids("),
+		"[§4-21] game_scene.gd 的代码部分里出现 Interaction.assign_guard_wire_ids(（带限定前缀与调用括号，注释满足不了）")
+	# ② 静态兜底（正则）：guard_wire_id **不许**被赋成字面量数字（各种拼法都认）。
+	var guard_literal_hits := _guard_wire_id_literals(game_code)
+	_fails += _check(guard_literal_hits.is_empty(),
+		"[§4-21] game_scene.gd 没有把 guard_wire_id 写死成字面量数字（各种拼法都认）%s"
+		% _first(guard_literal_hits))
+	# ③ 行为可区分：守卫名单扩成**两个**时，第二个必须拿到 2。
+	#    （P1 只有 1 个守卫 → 「写死 1」与「按规则算出 1」数值上不可区分；
+	#      编号规则本身必须按**名单顺序**递增 → 才能说明这条规则真的成立。）
+	var wire_two := Interaction.assign_guard_wire_ids(["old_chen", "new_wang"])
+	_fails += _check(wire_two.size() == 2
+			and int(wire_two.get("old_chen", -1)) == 1
+			and int(wire_two.get("new_wang", -1)) == 2,
+		"[§4-21] 守卫编号按**名单顺序**分配：两个守卫 → 1 和 2（实际 %s）" % str(wire_two))
+	# ④ 剥注释这个 helper 本身要被钉死（helper 改坏 → ① ② 一起失效）。
+	_fails += _check(not _strip_comments("var a = 1  # guard_wire_id = 1").contains("guard_wire_id"),
+		"[§4-21] 剥注释：**行尾注释**里的 guard_wire_id 不算进代码部分")
+	_fails += _check(not _strip_comments("# guard_wire_id = 1\nvar b = 2").contains("guard_wire_id"),
+		"[§4-21] 剥注释：**整行注释**里的 guard_wire_id 不算进代码部分")
+	_fails += _check(_strip_comments("var s = \"# guard_wire_id = 1\"").contains("guard_wire_id"),
+		"[§4-21] 剥注释：**字符串字面量**里的 # 不是注释起点")
+
+	# ==================================================================
 	# [§4-7] MultiplayerSpawner：spawn_path / 注册 player.tscn /
 	#         spawn_function 产出的节点名 == 传入的 peer id；
 	#         不许有手搓 players_root.add_child( 的路径
@@ -270,7 +311,9 @@ func _boot() -> void:
 				registered = true
 		_fails += _check(registered, "[§4-7] MultiplayerSpawner 已注册 player.tscn")
 		# 用一个随机 peer id 走一遍 spawn_function（房主侧调用）
-		spawned = spawner.spawn({"peer_id": 733754800, "index": 1, "spawn": Vector2(96, 320)})
+		# ★ index = 2（名单已经占了 index 0 / 1）→ 期望值**写字面量** (64, 224)，
+		#   **不许**调生产的 spawn_position_for_index() 去算（那样就是自证、恒真）。
+		spawned = spawner.spawn({"peer_id": 733754800, "index": 2, "spawn": Vector2(64, 224)})
 		_fails += _check(spawned != null and str(spawned.name) == "733754800",
 			"[§4-7] spawn_function 产出的节点名 == 传入的 peer id（实际 %s）"
 			% (str(spawned.name) if spawned != null else "<null>"))
@@ -293,7 +336,10 @@ func _boot() -> void:
 		# [§4-8] player_index 是稳定的 0–5 序号（不是 peer_id - 1）
 		# ==================================================================
 		var idx := int(spawned.get("player_index"))
-		_fails += _check(idx == 1, "[§4-8] player_index 取自下发的稳定序号（期望 1，实际 %d）" % idx)
+		# ★ 期望值随夹具走（修复轮 1 Important 1）：手工塞进来的玩家现在用的是
+		#   index 2（假名单 [1, 2] 已经占了 index 0 / 1）。
+		#   断言的**语义没变**：player_index == spawn 载荷里下发的那个序号。
+		_fails += _check(idx == 2, "[§4-8] player_index 取自下发的稳定序号（期望 2，实际 %d）" % idx)
 		_fails += _check(idx != 733754800 - 1,
 			"[§4-8] player_index 不是 peer_id - 1（实际 %d）" % idx)
 		_fails += _check(idx >= 0 and idx <= 5, "[§4-8] player_index ∈ [0, 5]（实际 %d）" % idx)
@@ -527,6 +573,52 @@ func _boot() -> void:
 	_fails += _check(not hits_guard, "[§4-19] 没有出生点与守卫岗位 (480, 288) 重合")
 
 	# ==================================================================
+	# [§4-20] ★ 出生点**不与任何道具点重合**（派单 §2.8 的明文约束）
+	# ==================================================================
+	# 派单 §2.8 写死「6 个出生点……都不与任何道具点重叠」——此前**没有任何断言**
+	# （人工逐格核对才算成立）。这里把道具点换算成像素后逐个比对。
+	var prop_points_px: Array = []
+	for tag in map_props.keys():
+		for pos in map_props[tag]:
+			prop_points_px.append(Vector2(pos))
+	_fails += _check(not prop_points_px.is_empty(),
+		"[§4-20] 前提：地图里确实有道具点可比（%d 个）" % prop_points_px.size())
+	var spawn_on_prop: Array = []
+	for p in positions:
+		for pp in prop_points_px:
+			if is_equal_approx(Vector2(p).x, Vector2(pp).x) \
+					and is_equal_approx(Vector2(p).y, Vector2(pp).y):
+				spawn_on_prop.append("出生点 %s 与道具点 %s 重合" % [str(p), str(pp)])
+	_fails += _check(spawn_on_prop.is_empty(),
+		"[§4-20] 没有出生点与任何道具点重合（派单 §2.8）%s" % _first(spawn_on_prop))
+
+	# ==================================================================
+	# [§4-22] ★ 两端对局场景路径一致（派单 §2.5）
+	# ==================================================================
+	# 派单 §2.5 要求「Task 11 的联机测试里要断言两端路径相同」。
+	# Task 11 交付的是**单进程** SceneTree 测试 → 真正的双进程一致性留给 Task 12；
+	# 这里做**最小断言**：房主侧与「客户端侧」读到的 lobby_ui.gd.game_scene_path
+	# **默认值相同**，且都等于 GAME_SCENE（res://scenes/game.tscn）。
+	# ★ game_scene_path 是**可覆盖**的变量 → 这里读的是**默认值**（新建实例、没注入过）。
+	var host_scene_path := ""
+	var client_scene_path := ""
+	var lobby_script: GDScript = load(LOBBY_UI_SRC)
+	if lobby_script != null:
+		var host_lobby: Node = lobby_script.new()
+		var client_lobby: Node = lobby_script.new()
+		host_scene_path = str(host_lobby.get("game_scene_path"))
+		client_scene_path = str(client_lobby.get("game_scene_path"))
+		host_lobby.free()
+		client_lobby.free()
+	_fails += _check(not host_scene_path.is_empty() and host_scene_path == client_scene_path,
+		"[§4-22] 房主侧与客户端侧读到的 lobby_ui.gd.game_scene_path **默认值相同**（%s / %s）"
+		% [host_scene_path, client_scene_path])
+	_fails += _check(host_scene_path == GAME_SCENE and client_scene_path == GAME_SCENE,
+		"[§4-22] 两端的 game_scene_path 默认值都 == GAME_SCENE（%s）" % GAME_SCENE)
+	_fails += _check(ResourceLoader.exists(host_scene_path),
+		"[§4-22] 两端默认路径指向的对局场景**真实存在**（%s）" % host_scene_path)
+
+	# ==================================================================
 	# [§4-10] 纯净化：不出现 Steam. / 惩罚性 token / 硬编码绝对场景路径
 	# ==================================================================
 	_fails += _check(not game_src.is_empty(), "[§4-10] game_scene.gd 可读")
@@ -617,6 +709,63 @@ func _has_word(src: String, token: String) -> bool:
 	if re.compile("\\b%s\\b" % token) != OK:
 		return src.contains(token)
 	return re.search(src) != null
+
+
+## 把源码里的**注释**剥掉，只留**代码部分**。
+##
+## ★ 为什么需要（修复轮 1 Important 2）：断言要扫「game_scene.gd 是不是**调用**了
+##   Interaction.assign_guard_wire_ids(」——而生产代码里那句**注释**也写着这个名字。
+##   不剥注释的话，一条注释就能满足扫描（变异 M8b 直接漏网）。
+## ★ 字符串字面量里的 '#' **不是**注释起点（否则会误剥代码）。
+## ★ 输入先过 _read_source()（已把 \r\n 归一化成 \n），所以这里按 \n 分行。
+func _strip_comments(src: String) -> String:
+	var lines: Array[String] = []
+	for line in src.split("\n"):
+		var kept := ""
+		var quote := ""
+		var i := 0
+		var n := line.length()
+		while i < n:
+			var ch := line[i]
+			if quote != "":
+				kept += ch
+				if ch == "\\" and i + 1 < n:
+					# 转义序列：把下一个字符原样带出来（不当作注释起点）
+					kept += line[i + 1]
+					i += 2
+					continue
+				if ch == quote:
+					quote = ""
+				i += 1
+				continue
+			if ch == "\"" or ch == "'":
+				quote = ch
+				kept += ch
+				i += 1
+				continue
+			if ch == "#":
+				break
+			kept += ch
+			i += 1
+		lines.append(kept)
+	return "\n".join(lines)
+
+
+## game_scene.gd 里「guard_wire_id 被赋成字面量数字」的**各种写法**。
+##
+## ★ 不能只认一种拼法（否则换个写法就绕过去了）：
+##   guard_wire_id = 1 / guard_wire_id := 1 / guard_wire_id": 1 /
+##   guard_wire_id", 1 / set("guard_wire_id", 1) / guard_wire_id: 1 ……
+## ★ 输入应该是**剥掉注释后的代码部分**（注释里写例子不算违规）。
+func _guard_wire_id_literals(src: String) -> Array:
+	var out: Array = []
+	var re := RegEx.new()
+	# 分隔符：, / := / = / :  （字典字面量、set(...) 实参、赋值、带类型的声明）
+	if re.compile("guard_wire_id[\"']?\\s*(?:,|:=|=|:)\\s*\\(?\\s*-?\\d+(?:\\.\\d+)?") != OK:
+		return ["<正则编译失败>"]
+	for m in re.search_all(src):
+		out.append(m.get_string())
+	return out
 
 
 ## 违规列表的首条描述（用于失败诊断）。
