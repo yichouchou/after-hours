@@ -37,6 +37,7 @@ const GAME_SCENE := "res://scenes/game.tscn"
 const RESULT_SCENE := "res://scenes/result.tscn"
 const LOBBY_SCENE := "res://scenes/lobby.tscn"
 const HUD_SCENE := "res://scenes/ui/hud.tscn"
+const PROP_SCENE := "res://scenes/mischief_prop.tscn"
 const LOBBY_UI_SRC := "res://scripts/ui/lobby_ui.gd"
 const SESSION_SRC := "res://scripts/net/session.gd"
 const RESULT_SRC := "res://scripts/ui/result_screen.gd"
@@ -64,6 +65,17 @@ const FRAME_BUDGET := 420
 
 ## 房主 peer id 恒为 1（ENet server-relay）。
 const HOST_PEER_ID := 1
+
+## ★ 「统一生成」不变量：两端玩家节点的**进树时刻差**上限（毫秒）。
+##   统一生成 → 几毫秒；两段式（先自己、后远端）→ ~1100 ms → 必红。
+## ★ 判的是**差**不是绝对时刻 → 与机器快慢无关。
+const SPAWN_TOGETHER_MAX_DIFF_MS := 200
+
+## 守卫的岗位（px）—— 与 scripts/game_scene.gd 的 GUARD_HOME 同值。
+const GUARD_HOME := Vector2(480, 288)
+
+## 这一段造出来的测试灯的 prop_id（**不会**与地图里的道具撞号）。
+const TEST_LAMP_PROP_ID := 9001
 
 ## 1 人局时每份清单的张数（clampi(player_count + 1, 3, 5) = 3）—— **写字面量**。
 const EXPECT_HAND_SIZE_1P := 3
@@ -309,6 +321,55 @@ func _single_process_part() -> void:
 	_fails += _check(guard != null, "[S21] 房主侧有守卫节点")
 	if guard == null:
 		return
+
+	# ------------------------------------------------------------------
+	# Part C：拔掉街上的路灯 → 守卫的视野**真的**变暗（房主权威）
+	# ------------------------------------------------------------------
+	# ★ 守卫会巡逻 → 它的**位置**不确定 → light_factor 的判定会飘。
+	#   → 先冻住它、把它放回岗位，测试灯也造在同一个位置
+	#   （距离 0 → 必然落在 GuardBrain.DARK_LAMP_RADIUS(160 px) 之内）。
+	var guard_was_physics := guard.is_physics_processing()
+	guard.set_physics_process(false)
+	guard.position = GUARD_HOME
+	var props_root_node = game.get_node_or_null("Props")
+	var lamp_packed: PackedScene = load(PROP_SCENE)
+	var test_lamp: Node = null
+	if props_root_node != null and lamp_packed != null:
+		test_lamp = lamp_packed.instantiate()
+		test_lamp.set("prop_tag", &"lamp")
+		test_lamp.set("prop_id", TEST_LAMP_PROP_ID)
+		test_lamp.position = GUARD_HOME
+		props_root_node.add_child(test_lamp)
+		await process_frame
+	var light_before := float(guard.call(&"_light_factor"))
+	_fails += _check(is_equal_approx(light_before, 1.0),
+		"[C1] 前提：拔灯**前**守卫的 light_factor == 1.0（实际 %.3f）" % light_before)
+	# ★ 走**房主裁决** adjudicate()（就是改世界的那一步所在的地方）。
+	#   peer_id 故意用 2（不是本机 1）：这一段**不许**弄脏房主自己那份计数
+	#   → [S35]/[S37] 钉着「只完成 1 条、只有 1 个标题」。
+	#   生产入口 send_submit_mischief() → submit_mischief() → adjudicate()
+	#   是**同一条**路径（双进程段 [D50]/[D51] 走的就是那条）。
+	var lamp_verdict: Dictionary = rpc_node.call(&"adjudicate", 2, &"mess_lamps",
+		TEST_LAMP_PROP_ID, 1.0)
+	_fails += _check(bool(lamp_verdict.get("success", false))
+			and str(lamp_verdict.get("reason", "")) == "ok",
+		"[C2] 前提：这次「拔掉街上的路灯」裁决**成功**（reason '%s'）"
+		% str(lamp_verdict.get("reason", "")))
+	await _wait_ms(150)
+	var lamp_meta_off := test_lamp != null and test_lamp.has_meta("lamp_on") \
+		and not bool(test_lamp.get_meta("lamp_on", true))
+	_fails += _check(lamp_meta_off,
+		"[C3] ★拔掉路灯：那盏灯的 meta \"lamp_on\" == false（真的写进世界了）")
+	var light_after := float(guard.call(&"_light_factor"))
+	_fails += _check(is_equal_approx(light_after, 0.6),
+		"[C4] ★拔掉路灯：守卫的 light_factor 从 1.0 变成 0.6（实际 %.3f；0.36 = 同一盏灯被算了两遍）"
+		% light_after)
+	# 收尾：撤掉这一段造出来的灯、让守卫恢复巡逻（后面的断言要在干净世界里跑）。
+	if test_lamp != null:
+		props_root_node.remove_child(test_lamp)
+		test_lamp.queue_free()
+	guard.set_physics_process(guard_was_physics)
+
 	var brain = guard.get("brain")
 	# 把守卫挪离岗位一点：这样 RETURN 状态能观察到（它走回岗位需要时间）。
 	guard.position = Vector2(480 + 90, 288)
@@ -646,6 +707,47 @@ func _double_process_part() -> void:
 		"[D45] 房主的退出时刻晚于客户端的回报时刻（房主 %s / 客户端 %s，epoch 毫秒）——房主先退会把客户端掐断"
 		% [str(host.get("exit_epoch_ms", "")), str(client.get("epoch_ms", ""))])
 
+	# ------------------------------------------------------------------
+	# Part B：「统一生成」不变量（房主与远端玩家**一起**生成）
+	# ------------------------------------------------------------------
+	# ★ 判的是**两端进树时刻的差**，不是绝对时刻 → 与机器快慢无关。
+	#   统一生成 → 差 ≈ 几毫秒；两段式（先自己、后远端）→ ~1100 ms → 必红。
+	# ★ 跨进程可比的时间戳用 Time.get_unix_time_from_system()（子进程记的）。
+	var host_enter := _enter_times(str(host.get("player_enter_ms", "")))
+	var client_enter := _enter_times(str(client.get("player_enter_ms", "")))
+	var host_spread := _spread_ms(host_enter)
+	var client_spread := _spread_ms(client_enter)
+	_fails += _check(host_enter.size() == 2 and host_spread >= 0
+			and host_spread <= SPAWN_TOGETHER_MAX_DIFF_MS,
+		"[D46] ★统一生成：房主侧「自己的玩家」与「远端玩家」**一起**生成（进树时刻差 %d ms ≤ %d ms；记到 %d 个节点）"
+		% [host_spread, SPAWN_TOGETHER_MAX_DIFF_MS, host_enter.size()])
+	_fails += _check(client_enter.size() == 2 and client_spread >= 0
+			and client_spread <= SPAWN_TOGETHER_MAX_DIFF_MS,
+		"[D47] ★统一生成：客户端侧两个玩家节点**一起**进树（进树时刻差 %d ms ≤ %d ms；记到 %d 个节点）"
+		% [client_spread, SPAWN_TOGETHER_MAX_DIFF_MS, client_enter.size()])
+	var host_round_ms := int(host.get("round_started_epoch_ms", "0"))
+	var client_round_ms := int(client.get("round_started_epoch_ms", "0"))
+	var host_first_enter := int(host_enter[0]) if host_enter.size() > 0 else -1
+	var client_first_enter := int(client_enter[0]) if client_enter.size() > 0 else -1
+	_fails += _check(host_round_ms > 0 and host_enter.size() == 2
+			and host_first_enter > host_round_ms,
+		"[D48] 房主侧：玩家的进树时刻**晚于**回合开始时刻（回合 %d ms → 进树 %d ms）——证明房主不是立刻生成自己的"
+		% [host_round_ms, host_first_enter])
+	_fails += _check(client_round_ms > 0 and client_enter.size() == 2
+			and client_first_enter > client_round_ms,
+		"[D49] 客户端侧：玩家的进树时刻**晚于**回合开始时刻（回合 %d ms → 进树 %d ms）"
+		% [client_round_ms, client_first_enter])
+
+	# ------------------------------------------------------------------
+	# Part C：拔掉路灯的世界效果（房主权威 + 客户端同步）
+	# ------------------------------------------------------------------
+	_fails += _check(int(host.get("lamp_off_count", "-1")) == 1,
+		"[D50] 房主侧：那盏路灯**真的灭了**（meta \"lamp_on\" == false 的道具数 == 1，实际 %s）"
+		% str(host.get("lamp_off_count", "")))
+	_fails += _check(int(client.get("lamp_off_count", "-1")) == 1,
+		"[D51] ★客户端同步：客户端那盏路灯也灭了（实际 %s）"
+		% str(client.get("lamp_off_count", "")))
+
 	_remove_own_handoff(handoff)
 	if _fails > 0:
 		print("---- 房主子进程输出 ----")
@@ -756,6 +858,36 @@ func _count_ids(ids: String) -> int:
 		if not p.strip_edges().is_empty():
 			n += 1
 	return n
+
+
+## 解析子进程回报的「玩家节点进树时刻」串 → **升序**的 epoch 毫秒数组。
+##
+## 串的形状（子进程 tools/smoke_child.gd 的 _enter_pairs()）：
+##     节点名:epoch毫秒,节点名:epoch毫秒
+## ★ 跨进程可比：子进程用 Time.get_unix_time_from_system()（**不是** get_ticks_msec()，
+##   后者是进程内计时器，父子进程之间不可比）。
+func _enter_times(raw: String) -> Array:
+	var times: Array = []
+	for part in str(raw).split(","):
+		var p := part.strip_edges()
+		if p.is_empty():
+			continue
+		var colon := p.rfind(":")
+		if colon <= 0:
+			continue
+		var ms := p.substr(colon + 1).strip_edges()
+		if not ms.is_valid_int():
+			continue
+		times.append(int(ms))
+	times.sort()
+	return times
+
+
+## 一组时刻的「最早 → 最晚」差（毫秒）。**不足 2 个**时返回 -1（数据不足）。
+func _spread_ms(times: Array) -> int:
+	if times.size() < 2:
+		return -1
+	return int(times[times.size() - 1]) - int(times[0])
 
 
 func _has_name(names: String, name: String) -> bool:

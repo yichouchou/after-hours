@@ -105,6 +105,15 @@ signal mischief_resolved_evt(peer_id: int, behavior_id: StringName, success: boo
 var players_root: Node2D = null
 var guards_root: Node2D = null
 
+## 由 game_scene.gd 注入的**道具容器**（**两端**都注入：客户端也有 props_root）。
+##
+## ★ 用途：房主按 target_id 找到「被拔掉的那盏灯」并熄灭它；
+##   客户端按 target_id 找到**自己**那盏灯并同步亮灭。
+## ★ 灯的状态**只**走 meta "lamp_on"（唯一入口是 Interaction.set_lamp_on）——
+##   不许引入第二套灯状态，也不许碰 guard.set_lamps()
+##   （双通道 → 同一盏灯被算两遍 → light_factor 变成 0.36 而不是 0.6）。
+var props_root: Node2D = null
+
 ## 房主侧的捣蛋行为表（Task 11 可注入；没注入时回退读 data/mischief.json）。
 var behaviors: Array = []
 
@@ -161,6 +170,10 @@ func adjudicate(peer_id: int, behavior_id: StringName, target_id: int,
 		reason = "target_taken"
 	# ★ 广播（"call_local" → 房主本地也执行；远端客户端也收到）。
 	resolve_mischief.rpc(peer_id, String(behavior_id), success, reason)
+	# ★ 改世界（房主权威）：只有「成功」且该行为有世界效果时才改。
+	#   落败方（target_taken）**不产生任何后果** —— 零失败惩罚。
+	if success:
+		_apply_world_effect(behavior_id, target_id)
 	return {"success": success, "reason": reason}
 
 
@@ -285,4 +298,62 @@ func _find_behavior(behavior_id: StringName) -> Mischief:
 	for m in _behavior_cache:
 		if m.id == behavior_id:
 			return m
+	return null
+
+
+## ── Task 12 修复轮 2：拔掉路灯的世界效果 ────────────────────────────────
+##
+## ★ 机制早就有（scripts/guard.gd 的 _light_factor() → GuardBrain.compute_light_factor）
+##   —— 缺的是「按下开关的那一下」：
+##   房主裁决出「mess_lamps 成功」→ 把那盏灯的 meta "lamp_on" 写成 false
+##   → 守卫的视野真的变短（每盏灭 −40%，1 盏 → 0.6）。
+##
+## ★ 「哪些行为有世界效果」的**扩展点**：_apply_world_effect() 按 behavior_id 分派。
+##   本轮**只实现 mess_lamps** —— 设计文档只给路灯规定了世界效果，
+##   其余 9 种在 P1 没有规定 → **不许自己发明**
+##   （例如「偷走萝卜就把萝卜删掉」）。
+
+## 房主 → 所有人：某盏路灯的亮灭状态变了。
+##
+## ★ 载荷是**纯数据**（int + bool）→ 符合「网络载荷必须是纯数据」。
+## ★ call_remote → **发送方本地不会执行**它
+##   → 房主自己那盏灯由房主本地写（见 _apply_world_effect）；
+##   这个 RPC 只负责把「这盏灯灭了」告诉客户端
+##   （与 Task 9 的 escort_finished / Task 10 的 submit_mischief 是同一个坑）。
+@rpc("authority", "call_remote", "reliable")
+func set_lamp_state(target_id: int, on: bool) -> void:
+	var lamp := _find_prop_by_id(target_id)
+	if lamp == null:
+		return
+	Interaction.set_lamp_on(lamp, on)
+
+
+## 房主：裁决成功之后**改世界**（本轮只有「拔路灯」一条有世界效果）。
+##
+## ★ 只在 success == true 时才被调用（落败方**不产生任何后果** —— 零失败惩罚）。
+## ★ 灯的状态**只**写 meta "lamp_on"（Interaction.set_lamp_on 是**唯一**入口）：
+##   不许引入第二套灯状态，也不许碰 guard.set_lamps()
+##   （双通道 → 同一盏灯被算两遍 → light_factor 变成 0.36 而不是 0.6）。
+func _apply_world_effect(behavior_id: StringName, target_id: int) -> void:
+	if behavior_id != &"mess_lamps":
+		return
+	var lamp := _find_prop_by_id(target_id)
+	if lamp == null:
+		return
+	# ★ 房主本地先写（call_remote 的 .rpc() 本地不执行 → 这里必须自己写）。
+	Interaction.set_lamp_on(lamp, false)
+	# ★ 再通知远端客户端（纯数据载荷：int + bool）。
+	set_lamp_state.rpc(target_id, false)
+
+
+## 按 prop_id 找道具节点（房主与客户端各找自己的 props_root）。
+##
+## ★ prop_id 存在 meta 里（scripts/mischief_prop.gd 的 _ready() 写的），
+##   与玩家侧读 target_id 的口径一致（scripts/player.gd 的 _prop_entries()）。
+func _find_prop_by_id(target_id: int) -> Node:
+	if props_root == null:
+		return null
+	for child in props_root.get_children():
+		if int(child.get_meta("prop_id", -1)) == target_id:
+			return child
 	return null

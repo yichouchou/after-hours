@@ -42,6 +42,7 @@ const GAME_SCENE_SRC := "res://scripts/game_scene.gd"
 const LOBBY_SRC := "res://scripts/ui/lobby_ui.gd"
 const SESSION_SRC := "res://scripts/net/session.gd"
 const TRANSPORT_SRC := "res://scripts/net/transport.gd"
+const RPC_SRC := "res://scripts/net/game_rpc.gd"
 
 ## ★ 清单 F3 承诺「房主退出 = 本局结束，客户端不会自动接管」。
 ##   这里从结构上钉它：唯一的"我是房主"判据是「自己的 peer id == 1」，
@@ -110,6 +111,7 @@ func _boot() -> void:
 	await _spawn_part()
 	await _result_part()
 	await _port_part()
+	await _lamp_chain_part()
 	_report_known_gaps()
 	_finish()
 
@@ -397,6 +399,46 @@ func _port_part() -> void:
 
 
 ## ==================================================================
+## 组 9：拔掉路灯的生产链路**已接通**（清单 D6 的预期已从「不过」改成「过」）
+## ==================================================================
+##
+## ★ 这一条原先只是**现状说明（NOTE，不判定成败）** —— Task 12 修复轮 2
+##   把生产链路接通之后，它必须**升格成断言**：
+##   清单 D6 现在写「预期为过」→ 这里就得钉住「生产链路真的接通了」，
+##   否则清单会变成过期文档（而「清单过期」正是这个测试存在的意义）。
+##
+## ★ 「接通」的四条判据（都必须在**代码部分**里，注释不算）：
+##   ① game_scene.gd 把 props_root 注入 RPC 节点（**两端**都要）；
+##   ② game_rpc.gd 有 set_lamp_state RPC（authority / call_remote / reliable）；
+##   ③ 房主裁决成功后**真的改世界**（Interaction.set_lamp_on 是唯一入口）；
+##   ④ 房主把「这盏灯灭了」广播出去（set_lamp_state.rpc(...)）。
+func _lamp_chain_part() -> void:
+	print("--- 组 9：拔路灯的生产链路 ---")
+	var game_src := _read_source(GAME_SCENE_SRC)
+	var rpc_src := _read_source(RPC_SRC)
+	_fails += _check(_lamp_chain_wired(rpc_src, game_src),
+		"[P35] ★拔路灯的生产链路**已接通**（注入 props_root + set_lamp_state RPC + 写 meta + 广播）")
+	# ★ 反向自检：证明上面那条判据**不是恒真**（只有注释提到它时必须判红）。
+	_fails += _check(not _lamp_chain_wired(
+			"## 房主写 meta：Interaction.set_lamp_on(node, false)\n"
+			+ "## set_lamp_state.rpc(target_id, false)\nvar x := 1\n",
+			"## rpc_node.set(\"props_root\", props_root)\n"),
+		"[P36] 反向自检：只有**注释**提到这条链路时，上面的判据必须判红（判据不是恒真）")
+
+
+## 生产链路「接通」了吗（拔掉路灯 → 守卫视野变暗）。
+func _lamp_chain_wired(rpc_src: String, game_src: String) -> bool:
+	var rpc_code := _code_lines(rpc_src)
+	var game_code := _code_lines(game_src)
+	return rpc_code.contains(
+			"@rpc(\"authority\", \"call_remote\", \"reliable\")\nfunc set_lamp_state(") \
+		and rpc_code.contains("func set_lamp_state(target_id: int, on: bool) -> void:") \
+		and rpc_code.contains("Interaction.set_lamp_on(") \
+		and rpc_code.contains("set_lamp_state.rpc(") \
+		and game_code.contains("rpc_node.set(\"props_root\", props_root)")
+
+
+## ==================================================================
 ## 组 8：把「已知问题」的现状**报出来**（NOTE，不判定成败）
 ## ==================================================================
 ## ★ 这些是**现状说明**，不是断言：
@@ -404,23 +446,13 @@ func _port_part() -> void:
 ##   → 只打印，交给验收的人对照清单第 3 节。
 func _report_known_gaps() -> void:
 	print("--- 已知问题现状（NOTE，不影响通过判定）---")
-	var player_src := _read_source(PLAYER_SRC)
 	var game_src := _read_source(GAME_SCENE_SRC)
-	var rpc_src := _read_source("res://scripts/net/game_rpc.gd")
 
-	# ① 拔路灯 → 守卫视野变暗：生产链路里没接通。
-	var wired := player_src.contains("turn_lamp_off") or game_src.contains("turn_lamp_off") \
-		or rpc_src.contains("turn_lamp_off")
-	_note(not wired,
-		"「拔掉街上的路灯」完成之后**不会**让守卫视野变暗（生产链路没接通）"
-		+ " → 清单 D6 预期为**不过**",
-		"「拔掉街上的路灯」现在**会**让守卫视野变暗了 → 清单 D6 可以改成「预期为过」，"
-		+ "并且第 3 节第 1 条要删掉")
-
-	# ② 多人局开局后玩家角色晚约 1.2 秒出现。
+	# ① 多人局开局后玩家角色晚约 1.2 秒出现。
 	var waits := game_src.contains("REMOTE_SPAWN_DELAY_SEC")
 	_note(waits,
-		"多人局开局后玩家角色会晚约 1.2 秒才出现（房主故意等一下再生成远端玩家）"
+		"多人局开局后玩家角色会晚约 1.2 秒才出现（房主故意等一下再把**所有人**"
+		+ "——含房主自己——**一起**放进来）"
 		+ " → 清单 A4 里「角色没立刻出现」**不是 bug**",
 		"房主现在不再等那 1.2 秒了 → 清单 A4 的「晚 1.2 秒才出现」和第 3 节第 2 条要改")
 
@@ -499,6 +531,19 @@ func _read_source(path: String) -> String:
 		return ""
 	var text := FileAccess.get_file_as_string(path)
 	return text.replace("\r\n", "\n")
+
+
+## 源码的**代码部分**（**整行注释**整行去掉；行尾注释不处理 —— 够用即可）。
+##
+## ★ 为什么需要：判据「生产链路接通了」不能被**注释**满足 ——
+##   否则有人在注释里写一句「这里会写 meta lamp_on」就能骗过它。
+func _code_lines(src: String) -> String:
+	var out: Array[String] = []
+	for line in src.replace("\r\n", "\n").split("\n"):
+		if line.strip_edges().begins_with("#"):
+			continue
+		out.append(line)
+	return "\n".join(out)
 
 
 ## 列表里第一个坏元素（空串 = 全好）。

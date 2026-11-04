@@ -35,6 +35,12 @@ const HOST_SETTLE_MS := 1500
 ## 客户端在结算页上等一会儿再汇报（让**房主先汇报** —— 房主先退会把客户端掐断；
 ## 客户端先退的话，房主汇报时看到的就只剩 1 人了）。
 const CLIENT_REPORT_DELAY_MS := 900
+## 客户端等房主把那盏路灯弄灭的上限（毫秒）。
+##
+## ★ 必须**小于**房主的剩余寿命（房主在回合开始后约 5.3 秒退出）：
+##   否则等超时后客户端才汇报 → 房主已经退了 → 客户端的名单被清空
+##   → 汇报里一堆无关字段变成「读不到」→ 失败现场变得很吵。
+const LAMP_SYNC_WAIT_MS := 3000
 
 var _mode := "host"
 var _base := 27100
@@ -50,6 +56,20 @@ var _round_started := 0
 var _round_ended := 0
 var _summary: Dictionary = {}
 var _roster: Array[int] = []
+
+## 每个玩家节点**进树的那一刻**（epoch 毫秒；跨进程可比）。
+##
+## ★ 用 Time.get_unix_time_from_system()（**不是** Time.get_ticks_msec()）：
+##   后者是**进程内**的计时器，父子两个进程之间**不可比**。
+## ★ key = 玩家节点的节点名（= peer id）。
+var _player_enter_ms: Dictionary = {}
+
+## 回合开始的时刻（epoch 毫秒）。
+var _round_started_epoch_ms := 0
+
+## 当前场景里有几盏灯的 meta "lamp_on" 是 false（= 真的被拔掉了）。
+## -1 = 读不到（没有对局场景了）。
+var _lamp_off_count := -1
 
 ## 大厅里读到的对局场景路径（两端各自读自己的默认值 → 父进程逐字节比对）。
 var _lobby_scene_path := ""
@@ -86,6 +106,7 @@ func _boot() -> void:
 		_handoff = str(args[3])
 	_t0 = Time.get_ticks_msec()
 
+	_connect_player_enter_tracking()
 	_resolve_session()
 	_session.set_transport(ENetTransport.new())
 	_session.roster_changed.connect(_on_roster)
@@ -173,6 +194,12 @@ func _run_host() -> void:
 
 	_capture_game_facts()
 
+	# ★ 拔路灯（Task 12 修复轮 2 Part C）：让一次「拔掉街上的路灯」真的成功
+	#   → 房主这盏灯真的灭 → 并通过 set_lamp_state 广播给客户端（两端一致）。
+	_do_mess_lamps()
+	# 房主这边是**同步**生效的（adjudicate 里直接写 meta）→ 立刻读得到。
+	_lamp_off_count = _count_lamps_off()
+
 	# 让客户端先把生成消息处理完，再收工。
 	await _sleep_ms(HOST_SETTLE_MS)
 
@@ -237,6 +264,15 @@ func _run_client() -> void:
 		return
 
 	_capture_game_facts()
+
+	# ★ 等房主把那盏灯弄灭（set_lamp_state 广播过来）→ 两端灯状态一致。
+	#   房主施加效果 → 房主自己写 meta + .rpc() 通知客户端（call_remote）。
+	var lamp_deadline := Time.get_ticks_msec() + LAMP_SYNC_WAIT_MS
+	while Time.get_ticks_msec() < lamp_deadline:
+		if _count_lamps_off() > 0:
+			break
+		await create_timer(STEP_SEC).timeout
+	_lamp_off_count = _count_lamps_off()
 
 	# 等结算页。
 	deadline = Time.get_ticks_msec() + 25000
@@ -340,11 +376,96 @@ func _on_roster(peers: Array[int]) -> void:
 
 func _on_round_started(deal: Array) -> void:
 	_round_started += 1
+	if _round_started_epoch_ms == 0:
+		_round_started_epoch_ms = int(Time.get_unix_time_from_system() * 1000.0)
 
 
 func _on_round_ended(summary: Dictionary) -> void:
 	_round_ended += 1
 	_summary = summary.duplicate(true)
+
+
+## ------------------------------------------------------------------
+## 记「玩家节点进树的那一刻」
+## ------------------------------------------------------------------
+##
+## ★ 用 SceneTree 的 node_added（**不是** child_entered_tree）：
+##   子进程是**轮询**当前场景的 → 等它发现对局场景时，生成消息**可能已经到达**
+##   → 那时再连 child_entered_tree 就会**漏记**第一个节点。
+##   node_added 在节点进树的**那一瞬间**就发 → **零竞态**。
+##   （实测：Godot 4.7.2 的 SceneTree 有 node_added 信号。）
+func _connect_player_enter_tracking() -> void:
+	if not has_signal(&"node_added"):
+		return
+	node_added.connect(_on_node_added)
+
+
+func _on_node_added(node: Node) -> void:
+	if node == null:
+		return
+	var parent := node.get_parent()
+	if parent == null or str(parent.name) != "Players":
+		return
+	# Players 容器里只有玩家节点；再用玩家自己的方法筛一道（更稳）。
+	if not node.has_method(&"set_spawn_position"):
+		return
+	var key := str(node.name)
+	if _player_enter_ms.has(key):
+		return
+	_player_enter_ms[key] = int(Time.get_unix_time_from_system() * 1000.0)
+
+
+## 玩家节点进树时刻的回报串：节点名:epoch 毫秒（按时刻**升序**，逗号分隔）。
+func _enter_pairs() -> String:
+	var rows: Array = []
+	for k in _player_enter_ms.keys():
+		rows.append([int(_player_enter_ms[k]), str(k)])
+	rows.sort_custom(func(a: Array, b: Array) -> bool: return int(a[0]) < int(b[0]))
+	var parts: Array[String] = []
+	for it in rows:
+		parts.append("%s:%d" % [str(it[1]), int(it[0])])
+	return ",".join(parts)
+
+
+## ------------------------------------------------------------------
+## 拔路灯（Part C）
+## ------------------------------------------------------------------
+##
+## 房主：提交一次「拔掉街上的路灯」（走**生产入口** send_submit_mischief）。
+## 成功后房主那盏灯真的灭，并广播 set_lamp_state 给客户端。
+func _do_mess_lamps() -> void:
+	var game = current_scene
+	if game == null:
+		return
+	var props = game.get_node_or_null("Props")
+	var rpc_node = game.get_node_or_null("RPC")
+	if props == null or rpc_node == null:
+		return
+	var lamp: Node = null
+	for child in props.get_children():
+		if StringName(str(child.get("prop_tag"))) == &"lamp":
+			lamp = child
+			break
+	if lamp == null:
+		return
+	var target_id := int(lamp.get("prop_id"))
+	rpc_node.call(&"send_submit_mischief", "mess_lamps", target_id)
+
+
+## 当前场景里有几盏灯的 meta "lamp_on" 是 false（= 真的被拔掉了）。
+## -1 = 读不到（没有对局场景了）。
+func _count_lamps_off() -> int:
+	var game = current_scene
+	if game == null:
+		return -1
+	var props = game.get_node_or_null("Props")
+	if props == null:
+		return -1
+	var n := 0
+	for child in props.get_children():
+		if child.has_meta("lamp_on") and not bool(child.get_meta("lamp_on", true)):
+			n += 1
+	return n
 
 
 ## ------------------------------------------------------------------
@@ -389,6 +510,11 @@ func _report() -> void:
 	_link("roster=%s" % _join_ids(_session.peers()))
 	_link("round_started=%d" % _round_started)
 	_link("round_ended=%d" % _round_ended)
+	# 回合开始的时刻（epoch 毫秒）与每个玩家节点进树的时刻（跨进程可比）。
+	_link("round_started_epoch_ms=%d" % _round_started_epoch_ms)
+	_link("player_enter_ms=%s" % _enter_pairs())
+	# 有几盏灯真的灭了（meta "lamp_on" == false 的道具数）。
+	_link("lamp_off_count=%d" % _lamp_off_count)
 	_link("lobby_scene_path=%s" % _lobby_scene_path)
 	_link("game_scene_file=%s" % _game_scene_file)
 	_link("player_names=%s" % _player_names)
