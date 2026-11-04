@@ -102,7 +102,10 @@ signal roster_changed(peers: Array[int])
 signal round_started(deal: Array)
 signal round_ended(summary: Dictionary)
 
-const DEFAULT_PORT := 27015
+## 默认端口。**28000**：不在 tools/port_alloc.gd 的保留段（27015–27024 /
+## 27030–27034 / 27040 / 27041 / 27050）里，也不在测试候选池（27100–27299）里
+## → 与并发跑的测试**不会撞**。P1 双窗口固定用这个端口（Task 13 验收清单里写明）。
+const DEFAULT_PORT := 28000
 const ALL_MISCHIEFS := "res://data/mischief.json"
 const MAX_CLIENTS := 6
 

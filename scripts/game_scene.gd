@@ -36,6 +36,25 @@ const PROP_SCENE := preload("res://scenes/mischief_prop.tscn")
 ## 守卫场景。
 const GUARD_SCENE := preload("res://scenes/guard.tscn")
 
+## 结算页（天亮结算）。
+const RESULT_SCENE := "res://scenes/result.tscn"
+
+## 结算页脚本（静态变量用来跨场景递结算载荷）。
+const ResultScreen := preload("res://scripts/ui/result_screen.gd")
+
+## 玩家脚本（结算时按节点名解析 peer id）。
+const PlayerScript := preload("res://scripts/player.gd")
+
+## ★ 缺口 C（Task 12 实测钉死）：远端玩家的**生成要等一小会儿**。
+##
+## MultiplayerSpawner 的生成消息只发给**当时在树里**的 spawner：
+## 客户端收到清单 → 切进 game.tscn → 它的 MultiplayerSpawner 这才进树。
+## 房主若在客户端进场景之前就 spawn()，那条消息**没人接**
+## （引擎没有「晚加入补发」的承诺）→ 客户端永远没有自己的玩家节点。
+## → 场上真的有多人时，房主**等 REMOTE_SPAWN_DELAY_SEC 秒**再生成，
+##   给客户端留出「收到清单 → 切场景 → spawner 进树」的时间。
+const REMOTE_SPAWN_DELAY_SEC := 1.2
+
 ## 地面贴图（256×256 的草地，用 region + repeat 平铺成整张地图）。
 const GROUND_TEXTURE := "res://assets/ground/ground_grass.png"
 
@@ -85,6 +104,12 @@ var _peer_index: Dictionary = {}
 ##   （"The multiplayer instance isn't currently active."）—— 每帧问一次会刷一屏错误。
 var _local_peer_id: int = 0
 
+## 每个 peer 被抓的次数（结算用；纯数据，跨进程可传）。
+var _caught_counts: Dictionary = {}
+
+## 每个 peer 已完成的捣蛋标题（结算用；纯数据）。
+var _done_titles: Dictionary = {}
+
 
 func _ready() -> void:
 	_local_peer_id = multiplayer.get_unique_id()
@@ -93,10 +118,11 @@ func _ready() -> void:
 	_build_world()
 	_connect_rpc()
 	_connect_session()
+	_connect_hud_finish()
 	# 先接上 child_entered_tree，再生成玩家 —— 否则新节点不会被注入。
 	players_root.child_entered_tree.connect(_on_player_entered_tree)
 	if multiplayer.is_server():
-		_spawn_players()
+		_spawn_players_when_clients_ready()
 	for child in players_root.get_children():
 		_inject_player(child)
 	_refresh_hud()
@@ -185,6 +211,29 @@ func _build_guards() -> void:
 
 ## ── 玩家生成（房主权威）────────────────────────────────────────────────
 
+## 房主：生成玩家。
+##
+## ★ 缺口 C（Task 12）：**真的有多人在线时**先等一小会儿再生成 ——
+##   客户端的 MultiplayerSpawner 必须在树里才接得住生成消息。
+##   没有别的玩家时没什么可等 → 立刻生成（本地模拟 / 单元测试不受影响）。
+func _spawn_players_when_clients_ready() -> void:
+	if _should_wait_for_clients():
+		await get_tree().create_timer(REMOTE_SPAWN_DELAY_SEC).timeout
+		if not is_inside_tree():
+			return
+	_spawn_players()
+
+
+## 场上是不是真的有别的玩家（要等他们进场景）。
+##
+## ★ 用 Session 的公开接口 peer_count()：**真的开了一局多人联机**才会 > 1。
+##   本地模拟 / 单元测试里的替身没有这个方法 → 视为「没人可等」。
+func _should_wait_for_clients() -> bool:
+	if session == null or not session.has_method(&"peer_count"):
+		return false
+	return int(session.call(&"peer_count")) > 1
+
+
 ## 房主：按出场顺序给名单里的每个人分配**稳定的 0–5 序号**并生成玩家。
 func _spawn_players() -> void:
 	var roster := _roster()
@@ -239,6 +288,12 @@ func _spawn_player_node(data: Variant) -> Node:
 	var spawn_pos: Vector2 = payload.get("spawn", Vector2.ZERO)
 	var p := PLAYER_SCENE.instantiate()
 	p.name = str(peer_id)
+	# ★ 在节点**进树之前**定好多人权威。
+	#   引擎规则（MultiplayerSynchronizer 的报错原文）：权威只能在
+	#   「spawner 的 _enter_tree 阶段」确定 —— 等 _ready() 再改，
+	#   同步器就拿不到 network ID（会打一条引擎 ERROR）。
+	#   这里用的是玩家脚本同一套解析口径（scripts/player.gd 的 resolve_authority）。
+	p.set_multiplayer_authority(PlayerScript.resolve_authority(str(peer_id)))
 	p.set("player_index", index)
 	# ★ 显式设置出生点（被抓时自己走回这里）。
 	p.call(&"set_spawn_position", spawn_pos)
@@ -336,6 +391,10 @@ func _connect_rpc() -> void:
 	_connect_signal(rpc_node, &"caught_player_evt", Callable(self, "_on_caught_player_evt"))
 	_connect_signal(rpc_node, &"mischief_resolved_evt",
 		Callable(self, "_on_mischief_resolved_evt"))
+	# ── 结算用的统计（Task 12）──────────────────────────────────────────
+	_connect_signal(rpc_node, &"caught_player_evt", Callable(self, "_count_caught"))
+	_connect_signal(rpc_node, &"mischief_resolved_evt",
+		Callable(self, "_track_mischief_resolved"))
 
 
 ## 接 Session 的回合开始信号（清单到手后刷新 HUD 与本地玩家的手牌）。
@@ -343,6 +402,8 @@ func _connect_session() -> void:
 	if session == null:
 		return
 	_connect_signal(session, &"round_started", Callable(self, "_on_round_started"))
+	# ── 回合结束（Task 12）：两端对称切到结算页 ──────────────────────────
+	_connect_signal(session, &"round_ended", Callable(self, "_on_round_ended"))
 
 
 ## 接信号（已接过就跳过，避免 "Signal already connected"）。
@@ -394,6 +455,8 @@ func _refresh_hud() -> void:
 			titles.append(mi.title)
 	hud.call(&"set_card_list", titles)
 	hud.call(&"set_hint", _hint_text())
+	# ── 「收工」按钮：**只有房主可点**（Task 12）────────────────────────
+	hud.call(&"set_finish_enabled", _is_host())
 
 
 ## 提示文案：操作提示 + **已完成**的捣蛋次数（不是进行中进度 —— 两者语义不许混）。
@@ -403,3 +466,99 @@ func _hint_text() -> String:
 	if local != null:
 		done = int(local.get("completed_mischief"))
 	return "按住 E 捣蛋 · 已完成 %d 条" % done
+
+
+## ── 收工 / 结算（Task 12）─────────────────────────────────────────────
+
+## 接 HUD 上的「收工」按钮。
+func _connect_hud_finish() -> void:
+	if hud == null:
+		return
+	if not hud.has_signal(&"finish_pressed"):
+		return
+	_connect_signal(hud, &"finish_pressed", Callable(self, "_on_finish_pressed"))
+
+
+## 「收工」被点了 → 组装摘要 → 广播收工。
+##
+## ★ 摘要的组装在**场景层**（这里）：手里有玩家节点
+##   （已完成次数 / 被抓次数 / 捣蛋标题）；Session 只负责广播。
+func _on_finish_pressed() -> void:
+	if session == null:
+		return
+	if not session.has_method(&"end_round"):
+		return
+	session.call(&"end_round", build_round_summary())
+
+
+## 组装结算载荷（**纯数据**，能跨进程传）。
+##
+## 结构：{ peer_id: { name, done, caught, mischief_titles } }。
+## ★ name 两端必须一致 —— 摘要由**房主**组装并广播，两端显示的是同一份数据。
+func build_round_summary() -> Dictionary:
+	var summary: Dictionary = {}
+	for child in players_root.get_children():
+		var pid := PlayerScript.resolve_authority(str(child.name))
+		summary[pid] = {
+			"name": _player_display_name(pid),
+			"done": int(child.get("completed_mischief")),
+			"caught": int(_caught_counts.get(pid, 0)),
+			"mischief_titles": (_done_titles.get(pid, []) as Array).duplicate(),
+		}
+	return summary
+
+
+## 玩家显示名（按房主名单里的出场顺序；两端一致）。
+func _player_display_name(peer_id: int) -> String:
+	var roster := _roster()
+	var idx := roster.find(peer_id)
+	if idx < 0:
+		return "玩家 %d" % peer_id
+	return "玩家 %d" % (idx + 1)
+
+
+## 行为 id → 标题（结算页显示的是标题，不是 id）。
+func _mischief_title(behavior_id: StringName) -> String:
+	for m in Mischief.load_all():
+		if m.id == behavior_id:
+			return m.title
+	return String(behavior_id)
+
+
+## 记一次被抓（结算用）。
+func _count_caught(peer_id: int, _guard_id: int) -> void:
+	_caught_counts[peer_id] = int(_caught_counts.get(peer_id, 0)) + 1
+
+
+## 记一条已完成的捣蛋（结算用）。只有**成功**才算完成。
+func _track_mischief_resolved(peer_id: int, behavior_id: StringName,
+		success: bool, _reason: String) -> void:
+	if not success:
+		return
+	var titles: Array = _done_titles.get(peer_id, [])
+	titles.append(_mischief_title(behavior_id))
+	_done_titles[peer_id] = titles
+
+
+## 回合结束（**两端都会触发**）→ 存下摘要并切到结算页。
+func _on_round_ended(summary: Dictionary) -> void:
+	ResultScreen.set_pending_summary(summary)
+	_goto_result_scene()
+
+
+## 切到结算页（走 Router，缺失场景由 Router 安全跳过）。
+func _goto_result_scene() -> void:
+	var tree := get_tree()
+	if tree == null:
+		return
+	var router = tree.root.get_node_or_null("Router")
+	if router == null:
+		return
+	router.call(&"goto", RESULT_SCENE)
+
+
+## 本机是不是房主（只有房主能收工）。
+func _is_host() -> bool:
+	if session == null or not session.has_method(&"is_host"):
+		return false
+	return bool(session.call(&"is_host"))

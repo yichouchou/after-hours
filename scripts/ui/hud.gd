@@ -12,16 +12,34 @@ extends CanvasLayer
 ## 气泡显示时长（秒）。
 const BUBBLE_DURATION := 2.5
 
+## 「收工」被按下（**只有房主能点** —— 可用性由对局场景按 Session.is_host() 控制）。
+signal finish_pressed
+
 @onready var _card_list: VBoxContainer = $CardList
 @onready var _hint: Label = $Hint
 @onready var _bubble: Label = $Bubble
 @onready var _bubble_timer: Timer = $BubbleTimer
+@onready var _finish_btn: Button = $FinishButton
 
 
 func _ready() -> void:
 	_bubble.visible = false
 	if not _bubble_timer.timeout.is_connected(_on_bubble_timeout):
 		_bubble_timer.timeout.connect(_on_bubble_timeout)
+	if not _finish_btn.pressed.is_connected(_on_finish_pressed):
+		_finish_btn.pressed.connect(_on_finish_pressed)
+
+
+## 「收工」按钮的可用性（**只有房主可点**）。
+##
+## 非房主：置灰（disabled == true）→ 点不动。
+func set_finish_enabled(enabled: bool) -> void:
+	_finish_btn.disabled = not enabled
+
+
+## 「收工」按钮被按下 → 通知对局场景（组装摘要 + 广播收工）。
+func _on_finish_pressed() -> void:
+	finish_pressed.emit()
 
 
 ## 设置清单（每行一条）。空数组 = 清空。

@@ -30,20 +30,60 @@ var game_scene_path: String = GAME_SCENE
 
 var _session: Session = null
 
+## 已经建立过信号连接的 Session（换 Session 时要把旧连接断开）。
+##
+## ★ `_session` 是**可替换**的（测试会事后注入替身 Session）。
+##   只在 _ready() 里连一次的话，连接会一直指着**旧**的那个 Session ——
+##   替身发信号时大厅收不到 → 切场景逻辑看着像坏了，其实是指错了对象。
+var _connected_session: Session = null
+
 
 func _ready() -> void:
 	_session = get_node_or_null("/root/Session")
 	_host_btn.pressed.connect(_on_host)
 	_join_btn.pressed.connect(_on_join)
 	_start_btn.pressed.connect(_on_start)
-	if _session != null:
-		_session.roster_changed.connect(_on_roster)
+	_connect_session_signals()
 	_refresh()
+
+
+## 接 Session 的信号（**针对当前的 self._session**）。
+##
+## ★ 每次拿到 Session 之后都要重新调一次（_ready / 建房 / 加入 / 开局之前）：
+##   `_session` 可被替换 → 只在 _ready() 里连一次会连到**旧**的那个。
+##   连之前先查 is_connected（连两次会报 "Signal already connected"）。
+func _connect_session_signals() -> void:
+	if _connected_session == _session:
+		return
+	if _connected_session != null:
+		_disconnect_session_signals(_connected_session)
+	_connected_session = _session
+	if _session == null:
+		return
+	if not _session.roster_changed.is_connected(_on_roster):
+		_session.roster_changed.connect(_on_roster)
+	# ★ 切场景**由 round_started 驱动**（两端对称）。
+	#   房主点「开始」→ start_round() → round_started（同步）；
+	#   客户端收到定向清单 → _apply_deal() → round_started。
+	#   两端都从这里切进对局场景 → 行为完全一致（客户端不再卡在大厅）。
+	if not _session.round_started.is_connected(_on_round_started):
+		_session.round_started.connect(_on_round_started)
+
+
+## 断开上一个 Session 的信号连接（大厅只听**一个** Session）。
+func _disconnect_session_signals(s: Session) -> void:
+	if s == null:
+		return
+	if s.is_connected(&"roster_changed", _on_roster):
+		s.disconnect(&"roster_changed", _on_roster)
+	if s.is_connected(&"round_started", _on_round_started):
+		s.disconnect(&"round_started", _on_round_started)
 
 
 func _on_host() -> void:
 	if _session == null:
 		return
+	_connect_session_signals()
 	var err := _session.host_game()
 	if err != OK:
 		_status.text = "创建房间失败（端口被占用？）"
@@ -56,6 +96,7 @@ func _on_host() -> void:
 func _on_join() -> void:
 	if _session == null:
 		return
+	_connect_session_signals()
 	var err := _session.join_game(JOIN_ADDRESS)
 	if err != OK:
 		_status.text = "加入失败（地址不对？）"
@@ -69,6 +110,8 @@ func _on_start() -> void:
 	# 只有房主能开局（一切联机判定都在房主执行）。
 	if _session == null or not _session.is_host():
 		return
+	# ★ 重新接一次信号：`_session` 可能已经被换成替身（连接不许指着旧对象）。
+	_connect_session_signals()
 	# 对局场景还没建好时**不开回合**：Router 会安全跳过缺失的场景，
 	# 于是就留下「回合开了但人还在大厅」的半成品 —— 牌已经发出去，
 	# 人却卡在大厅里（Task 8 建好 game.tscn 之前不能这样）。
@@ -77,6 +120,16 @@ func _on_start() -> void:
 		_status.text = "对局场景还没建好（%s 缺失），暂时开不了局" % game_scene_path
 		return
 	_session.start_round()
+	# ★ 这里**不再**直接切场景：切场景统一由 round_started 信号驱动
+	#   （见 _on_round_started）→ 房主与客户端**行为完全对称**，
+	#   房主也不会在同一个回合里切两次场景。
+
+
+## 回合开始（房主与客户端都会收到这个信号）→ 切进对局场景。
+##
+## ★ 用的是**同一个变量** game_scene_path（不许用常量 GAME_SCENE ——
+##   上面那段注释已经写明：存在性判定与切换目标必须是同一个变量）。
+func _on_round_started(_deal: Array) -> void:
 	var router := get_node_or_null("/root/Router")
 	if router != null:
 		router.goto(game_scene_path)
