@@ -48,6 +48,18 @@
     "style_ref": "assets/chars/char_0.png",
     "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
   },
+  "assets/ground/ground_grass.png": {
+    "node_id": "459970691515511",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a uniform flat texture of dark teal green night grass seen straight from above, even lighting, fills the entire frame edge to edge, no vignette, no light beam, no path, no object, tileable",
+    "style_ref": null,
+    "tool": "mcode-tools connector__matrix__generate_image"
+  },
+  "assets/ground/ground_path.png": {
+    "node_id": "459971958092443",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a uniform flat texture of warm brown packed dirt with small pebbles and cracks seen straight from above, even lighting, fills the entire frame edge to edge, no white background, no grass, no object",
+    "style_ref": "assets/ground/ground_grass.png",
+    "tool": "mcode-tools connector__matrix__generate_image"
+  },
   "assets/props/prop_barrel.png": {
     "bg_node_id": "459969860682394",
     "node_id": "459969307763942",

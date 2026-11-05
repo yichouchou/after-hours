@@ -148,6 +148,7 @@ def make_tile(img, size):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kind", required=True, choices=["char", "prop", "tile"])
+    ap.add_argument("--only", default="", help="只跑输出路径含该子串的条目")
     ap.add_argument("--manifest",
                     default=os.path.join(ROOT, "tools", "art_manifest.json"))
     ap.add_argument("--dry-run", action="store_true")
@@ -157,6 +158,8 @@ def main():
         manifest = json.load(f)
     prefix = manifest["style_prefix"]
     items = [it for it in manifest["items"] if it["kind"] == args.kind]
+    if args.only:
+        items = [it for it in items if args.only in it["out"]]
     if not items:
         print("清单里没有 kind=%s 的条目" % args.kind)
         return 0

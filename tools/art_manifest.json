@@ -17,6 +17,8 @@
     {"out": "assets/props/prop_bench.png", "kind": "prop", "world_size": [56, 24], "prompt": "a single long wooden park bench seen from the side, close up", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
     {"out": "assets/props/prop_pot.png", "kind": "prop", "world_size": [24, 24], "prompt": "a single terracotta flower pot with a small green plant, close up", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
     {"out": "assets/props/prop_sign.png", "kind": "prop", "world_size": [22, 40], "prompt": "a single wooden notice board sign on a post, close up", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
-    {"out": "assets/props/prop_dog.png", "kind": "prop", "world_size": [30, 22], "prompt": "a single small brown dog sitting, close up", "style_ref": "assets/chars/char_0.png", "anchor": "feet"}
+    {"out": "assets/props/prop_dog.png", "kind": "prop", "world_size": [30, 22], "prompt": "a single small brown dog sitting, close up", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
+    {"out": "assets/ground/ground_grass.png", "kind": "tile", "world_size": [256, 256], "prompt": "a uniform flat texture of dark teal green night grass seen straight from above, even lighting, fills the entire frame edge to edge, no vignette, no light beam, no path, no object, tileable", "style_ref": null, "anchor": "none"},
+    {"out": "assets/ground/ground_path.png", "kind": "tile", "world_size": [256, 256], "prompt": "a uniform flat texture of warm brown packed dirt with small pebbles and cracks seen straight from above, even lighting, fills the entire frame edge to edge, no white background, no grass, no object", "style_ref": "assets/ground/ground_grass.png", "anchor": "none"}
   ]
 }
