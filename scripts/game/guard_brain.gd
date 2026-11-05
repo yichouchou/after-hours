@@ -109,7 +109,9 @@ func finish_carry() -> void:
 func update(delta: float, ctx: Dictionary) -> Dictionary:
 	var player_pos: Vector2 = ctx.get("player_pos", Vector2.ZERO)
 	var guard_pos: Vector2 = ctx.get("guard_pos", Vector2.ZERO)
-	var facing: Vector2 = ctx.get("guard_facing", Vector2.RIGHT)
+	# guard_facing 由场景层读入（供外部观察守卫朝向），本函数只用场景层算好的
+	# player_visible 做判定，所以按下面同样的约定加下划线，避免未使用变量告警。
+	var _facing: Vector2 = ctx.get("guard_facing", Vector2.RIGHT)
 	var visible: bool = bool(ctx.get("player_visible", false))
 	var noise_active: bool = bool(ctx.get("noise_active", false))
 	var noise_pos: Vector2 = ctx.get("noise_pos", Vector2.ZERO)
