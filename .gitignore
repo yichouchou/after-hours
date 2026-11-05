@@ -1,7 +1,10 @@
 .godot/
 export_presets.cfg
-build/
-export/
+# ★ 根锚定（前面加 /）：裸的 "build/" 与 "export/" 会被 git 匹配到**任意层级**的
+#   同名目录 —— 曾经把 addons/godot_ai/export/（插件的导出插件脚本）静默漏掉，
+#   干净检出会报 "Preload file ... does not exist"。只忽略仓库根的那两个目录。
+/build/
+/export/
 *.tmp
 steam_appid.txt
 secrets/*.txt
