@@ -173,6 +173,30 @@ func _boot() -> void:
 			"[§4-3] 地面 region 左上角在 (0,0)（centered = false 的前提）")
 
 	# ==================================================================
+	# [§4-3] 相机必须钳在地图内
+	#
+	# 镜头是运行时挂在玩家身上的（game_scene.gd 的 _attach_camera）。
+	# 玩家出生在地图最左列（tile 2,9），相机若不钳制就会向左溢出地图，
+	# 画面左边 40% 直接露出 clear color（黑虚空）。
+	# 源码级断言（仓库既有惯例）+ 运行时断言（场景里真有相机时）。
+	# ==================================================================
+	_fails += _check(game_src.contains("limit_left") and game_src.contains("limit_right")
+			and game_src.contains("limit_bottom"),
+		"[§4-3] game_scene.gd 给相机设了 limit_left/right/bottom")
+	var cam: Camera2D = null
+	if players_root != null:
+		for c in players_root.get_children():
+			var cc := c.get_node_or_null("Camera2D") as Camera2D
+			if cc != null:
+				cam = cc
+				break
+	if cam != null:
+		_fails += _check(cam.limit_left == 0 and cam.limit_top == 0
+				and cam.limit_right == 960 and cam.limit_bottom == 576,
+			"[§4-3] 相机 limit 钳在地图 960x576 内（实际 %d/%d/%d/%d）"
+			% [cam.limit_left, cam.limit_top, cam.limit_right, cam.limit_bottom])
+
+	# ==================================================================
 	# [§4-4] 道具数量 == 地图里的道具点位数（dog 也算进去）
 	# ==================================================================
 	var expected_points := 0
@@ -445,14 +469,14 @@ func _boot() -> void:
 	var local_cam_ok := false
 	var cam_count := 0
 	for child in players_root.get_children():
-		var cam := child.get_node_or_null("Camera2D") as Camera2D
-		_fails += _check(cam != null, "[§4-12] 玩家节点带 Camera2D")
-		if cam == null:
+		var player_cam := child.get_node_or_null("Camera2D") as Camera2D
+		_fails += _check(player_cam != null, "[§4-12] 玩家节点带 Camera2D")
+		if player_cam == null:
 			continue
 		cam_count += 1
-		_fails += _check(cam.get_node_or_null("MultiplayerSynchronizer") == null,
+		_fails += _check(player_cam.get_node_or_null("MultiplayerSynchronizer") == null,
 			"[§4-12] 相机不带 MultiplayerSynchronizer（不参与同步判定）")
-		if cam.enabled:
+		if player_cam.enabled:
 			enabled_cams += 1
 			if str(child.name) == str(local_peer_id):
 				local_cam_ok = true

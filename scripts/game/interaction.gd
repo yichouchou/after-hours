@@ -146,7 +146,7 @@ static func attach_lamps(guard: Node, lamp_root: Node2D) -> bool:
 ## 熄灭 / 点亮一盏灯。**必须走 Task 9 已定的读取契约**：
 ##
 ##   优先级 = **meta "lamp_on" → 属性 lamp_on → 都没有就当亮着**
-##   （读取方是 scripts/guard.gd 的 _lamp_is_on()，本文件**不许**自创读法）。
+##   （读取方是 is_lamp_on()，见下；守卫视野计算与画面灯光都调它）。
 ##
 ## → 这里**只写 meta "lamp_on"**（meta 的优先级最高），
 ##   属性 lamp_on 保持为「作者设定的初始值」不动。
@@ -154,6 +154,27 @@ static func set_lamp_on(node: Node, on: bool) -> bool:
 	if node == null:
 		return false
 	node.set_meta("lamp_on", bool(on))
+	return true
+
+
+## 这盏灯亮着吗？亮着 → true。**灯亮灭的唯一读取路径**。
+##
+## ★ 读取契约（Task 9 定，优先级从高到低）：
+##   meta "lamp_on" → 属性 lamp_on → 都没有就当亮着。
+##
+##   守卫的视野计算（scripts/guard.gd 的 _lamp_is_on）走它；
+##   画面上的灯光显示（scripts/mischief_prop.gd 的 _process）也走它 ——
+##   所以"画面变暗"和"守卫看不见"永远是同一个状态。
+##
+## 纯逻辑约束：只读节点自身的 meta 与属性，**不碰场景树**（无 get_tree / get_node）。
+static func is_lamp_on(node: Node) -> bool:
+	if node == null:
+		return true
+	if node.has_meta("lamp_on"):
+		return bool(node.get_meta("lamp_on", true))
+	for p in node.get_property_list():
+		if str(p.get("name", "")) == "lamp_on":
+			return bool(node.get("lamp_on"))
 	return true
 
 

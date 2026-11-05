@@ -1,7 +1,7 @@
 [gd_scene load_steps=3 format=3 uid="uid://btwkk3wwunvjs"]
 
 [ext_resource type="Script" uid="uid://xof6hnl66lly" path="res://scripts/guard.gd" id="1_guard"]
-[ext_resource type="Texture2D" uid="uid://7u1m7i2mbeda" path="res://assets/chars/char_5.png" id="2_tex"]
+[ext_resource type="Texture2D" path="res://assets/chars/char_guard.png" id="2_tex"]
 
 [node name="Guard" type="Node2D"]
 script = ExtResource("1_guard")
@@ -9,4 +9,5 @@ script = ExtResource("1_guard")
 [node name="Sprite2D" type="Sprite2D" parent="."]
 texture = ExtResource("2_tex")
 centered = false
-offset = Vector2(-32, -64)
+offset = Vector2(-64, -128)
+scale = Vector2(0.5, 0.5)

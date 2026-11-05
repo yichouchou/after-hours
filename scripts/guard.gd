@@ -53,6 +53,10 @@ const PATROL_POINT_TOLERANCE := 4.0
 ## 广播守卫状态的间隔（秒）。守卫只跑在房主，广播只是给客户端看表现。
 const STATE_BROADCAST_INTERVAL := 0.05
 
+## 朝向翻转的判定阈值：朝向向量在 x 轴上的投影（cos(facing_angle)）。
+## |投影| ≤ 阈值 → 正在上下走 / 转身中 → 保持上一次朝向。
+const FLIP_FACING_THRESHOLD := 0.35
+
 @onready var sprite: Sprite2D = $Sprite2D
 
 ## 由游戏场景注入的玩家容器（运行时注入，**不**硬编码路径）。
@@ -140,6 +144,23 @@ func _physics_process(delta: float) -> void:
 	_broadcast_state(brain.state, delta)
 
 
+## 朝向决定贴图左右翻转。
+##
+## ★ 只改 sprite.flip_h，**绝不改节点 rotation** ——
+##   节点一转，贴图连同 offset 一起转，人物就绕着脚底翻倒了（见 facing_angle 的说明）。
+## 判定用朝向向量在 x 轴上的投影：facing = Vector2.RIGHT.rotated(facing_angle)
+## → facing.x = cos(facing_angle)；投影为负（朝左）才翻。
+##
+## 放在 _process 而不是 _physics_process：客户端那个守卫不跑 AI（只按广播更新位置），
+## 但它也有 facing_angle —— _process 两端都会跑，翻转逻辑两端一致。
+func _process(_delta: float) -> void:
+	var face_x := cos(facing_angle)
+	if face_x < -FLIP_FACING_THRESHOLD:
+		sprite.flip_h = true
+	elif face_x > FLIP_FACING_THRESHOLD:
+		sprite.flip_h = false
+
+
 ## 组装给纯逻辑用的"世界快照"。
 ##
 ## 场景层负责算 player_visible（大脑只信任 ctx，不重算）与 light_factor。
@@ -206,14 +227,9 @@ func _lamp_states() -> Array:
 	return out
 
 
-## 这盏灯亮着吗？亮着 → true。
+## 这盏灯亮着吗？亮着 → true。读取路径收口到 Interaction.is_lamp_on()。
 func _lamp_is_on(n: Node) -> bool:
-	if n.has_meta("lamp_on"):
-		return bool(n.get_meta("lamp_on", true))
-	for p in n.get_property_list():
-		if str(p.get("name", "")) == "lamp_on":
-			return bool(n.get("lamp_on"))
-	return true
+	return Interaction.is_lamp_on(n)
 
 
 ## 注入玩家容器。

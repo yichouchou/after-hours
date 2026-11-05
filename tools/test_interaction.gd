@@ -59,8 +59,8 @@ const RPC_BLOCK_RESOLVE := "@rpc(\"authority\", \"call_local\", \"reliable\")\nf
 ## 押送到达出生点的容差（与 scripts/player.gd 的常量同值）。
 const ESCORT_TOLERANCE := 8.0
 
-## 道具贴图 32×32（**图片**下沿落在 y = 0）。
-const PROP_TEXTURE_SIZE := 32.0
+## 道具贴图改成 2x 自然尺寸（每种道具高度不同），所以高度按**实际贴图**断言；
+## "图片下沿落在地面 y = 0"这条不变（由 scripts/mischief_prop.gd 的自动锚定保证）。
 
 var _fails := 0
 var _total := 0
@@ -339,14 +339,18 @@ func _boot() -> void:
 			"[§4-14] prop_tag 导出生效（_ready() 写进 meta）")
 		_fails += _check(int(prop.get_meta("prop_id", -1)) == 42,
 			"[§4-14] prop_id 导出生效")
-		var sprite = prop.get_node_or_null("Sprite2D")
+		var sprite := prop.get_node_or_null("Sprite2D") as Sprite2D
 		_fails += _check(sprite != null, "[§4-14] 道具带 Sprite2D")
 		if sprite != null:
 			_fails += _check(sprite.centered == false,
 				"[§4-14] Sprite2D.centered == false（默认 true → 道具整体上浮 19 px、悬在半空）")
 			var rect: Rect2 = sprite.get_rect()
-			_fails += _check(is_equal_approx(rect.size.y, PROP_TEXTURE_SIZE),
-				"[§4-14] 道具贴图 32×32（实测 %.0f）" % rect.size.y)
+			# 高度按**实际贴图**断言（道具改成 2x 自然尺寸，每种高度不同）；
+			# "图片下沿落在地面 y = 0"这条不变（自动锚定保证的）。
+			var tex: Texture2D = sprite.texture
+			var expect_h := float(tex.get_height()) if tex != null else 0.0
+			_fails += _check(is_equal_approx(rect.size.y, expect_h) and expect_h > 0.0,
+				"[§4-14] 道具贴图高度 = 实际贴图高度（实测 %.0f，期望 %.0f）" % [rect.size.y, expect_h])
 			_fails += _check(is_equal_approx(rect.position.y + rect.size.y, 0.0),
 				"[§4-14] **图片**下沿落在地面 y = 0（rect %s）" % str(rect))
 
@@ -402,6 +406,22 @@ func _boot() -> void:
 		var ctx_again: Dictionary = lamp_guard._sense_context()
 		_fails += _check(is_equal_approx(float(ctx_again["light_factor"]), 1.0),
 			"[§4-16] 重新点亮 → light_factor 回到 1.0（证明是熄灯起作用，不是别的原因）")
+		# [§4-16] 熄灯必须同时作用到**画面**：灯光节点消失、贴图压暗。
+		# （灯光节点由场景层挂上，这里手动补一个，测的是同步逻辑本身。）
+		var lamp_light := PointLight2D.new()
+		lamp_light.name = "PointLight2D"
+		lamp_prop.add_child(lamp_light)
+		await process_frame
+		_fails += _check(lamp_light.visible,
+			"[§4-16] 灯亮着 → 灯光节点可见")
+		lamp_prop.turn_lamp_off()
+		await process_frame
+		_fails += _check(not lamp_light.visible,
+			"[§4-16] 熄灯后对应的 PointLight2D 不可见（画面与玩法一致）")
+		lamp_prop.turn_lamp_on()
+		await process_frame
+		_fails += _check(lamp_light.visible,
+			"[§4-16] 重新点亮 → 灯光节点恢复可见")
 		# [§4-20] 同一盏灯不能被算两次
 		_fails += _check(lamp_guard._lamp_states().size() == 1,
 			"[§4-20] 守卫只收到**一盏**灯（同一盏灯不会被算两次）")

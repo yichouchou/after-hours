@@ -20,12 +20,12 @@ const PENALTY_TOKENS := ["penalty", "penalized", "score", "score_delta",
 ## 子串扫会把任何恰好含有相邻字母的无关标识符误判成命中。
 const PENALTY_WORD_TOKENS := ["hp"]
 
-## char_0.png 的不透明像素包围盒**实测** = (14, 7, 50, 63)（64×64 画布）
-## → 画布内 alpha 中心 x = 32.0、alpha 底边 = 64（= 画布高度）。
+## char_0.png 的不透明像素包围盒**实测** = (35, 0, 92, 128)（128x128 画布，2x 素材）
+## → 画布内 alpha 中心 x = 63.5、alpha 底边 = 128（= 画布高度）。
 ## 派单按包围盒 (14, 7, 51, 64) 估成 32.5，与实测差 0.5 px → 这里按**实测值**断言
-## （判据比派单那条更严：|rect.x + 32.0| ≤ 2 同样覆盖 32.5）。
-const ALPHA_CENTER_X := 32.0
-const ALPHA_BOTTOM := 64.0
+## （判据比派单那条更严：|rect.x + 64.0| ≤ 2 同样覆盖 63.5）。
+const ALPHA_CENTER_X := 64.0
+const ALPHA_BOTTOM := 128.0
 
 var _fails := 0
 var _total := 0

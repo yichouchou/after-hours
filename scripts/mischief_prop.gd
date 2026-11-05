@@ -41,3 +41,33 @@ func turn_lamp_off() -> void:
 ## 把这盏灯**点亮**（走 Task 9 的读取契约：写 meta "lamp_on"）。
 func turn_lamp_on() -> void:
 	Interaction.set_lamp_on(self, true)
+
+
+## ★ 素材按 2x 出图（贴图尺寸 = 世界尺寸 × 2），Sprite2D 用 scale 0.5 回到世界尺寸。
+##   自动锚定：offset = (-w/2, -h) → 水平居中、底边贴地（对任意尺寸都成立）。
+##
+##   场景文件里的 offset 只是**默认值**；每种道具贴图尺寸不同，
+##   所以由场景层（scripts/game_scene.gd 的 _build_props）在摆道具时调本函数重算。
+func apply_texture(tex: Texture2D) -> void:
+	if tex == null:
+		return
+	var sprite := get_node_or_null("Sprite2D") as Sprite2D
+	if sprite == null:
+		return
+	sprite.texture = tex
+	sprite.offset = Vector2(-tex.get_width() * 0.5, -tex.get_height())
+
+
+## 灯的亮灭同步到画面：灯灭 → 灯光不可见 + 贴图压暗。
+##
+## ★ 读取路径收口到 Interaction.is_lamp_on() —— 与守卫的视野计算**同源**：
+##   画面变暗的那一刻守卫也就看不见了；两者永远不会各说各话。
+func _process(_delta: float) -> void:
+	var light := get_node_or_null("PointLight2D") as PointLight2D
+	if light == null:
+		return
+	var on := Interaction.is_lamp_on(self)
+	light.visible = on
+	var sprite := get_node_or_null("Sprite2D") as Sprite2D
+	if sprite != null:
+		sprite.modulate = Color.WHITE if on else Color(0.55, 0.55, 0.65)

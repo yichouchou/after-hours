@@ -27,6 +27,20 @@ extends CharacterBody2D
 ## 贴图张数。
 const CHAR_TEXTURE_COUNT := 6
 
+## ★ 角色素材按 2x 出图（128×128 贴图 = 世界 64×64），
+##   Sprite2D 用 scale 0.5 回到世界尺寸（窗口 1280×720 / 逻辑 640×360 = 2 倍像素，
+##   2x 资源在窗口像素上 1:1 采样 → 笔触清晰）。
+const SPRITE_SCALE := 0.5
+
+## 水平速度超过这个值（px/s）才算「在往一边走」→ 决定贴图左右翻转。
+##
+## ★ 用**速度死区**而不是「0.15s 滞回计时」：滞回计时必须存在玩家脚本变量里，
+##   而 tools/test_guard_flow.gd [§3-9] 与 tools/test_interaction.gd [§4-19]
+##   都断言「押送期间玩家脚本变量除 escorted / _bob 外零变化」——
+##   多一个会变的脚本变量就会踩坏那两条**既有**断言。
+##   死区口径：|vx| ≤ 阈值 → 方向不明（站着 / 转身中）→ 保持上一次朝向。
+const FLIP_SPEED_THRESHOLD := 8.0
+
 ## 权威 id 的位数上限（peer id 最多 10 位）。
 const MAX_AUTHORITY_DIGITS := 10
 
@@ -222,11 +236,19 @@ func _physics_process(delta: float) -> void:
 	if dir != Vector2.ZERO:
 		_bob += delta * 9.0
 		sprite.position.y = -absf(sin(_bob)) * 3.0
-		sprite.scale = Vector2(1.0 + sin(_bob * 2.0) * 0.04, 1.0 - sin(_bob * 2.0) * 0.04)
+		sprite.scale = Vector2.ONE * SPRITE_SCALE * Vector2(
+				1.0 + sin(_bob * 2.0) * 0.04, 1.0 - sin(_bob * 2.0) * 0.04)
 	else:
 		_bob = 0.0
 		sprite.position.y = 0.0
-		sprite.scale = Vector2.ONE
+		sprite.scale = Vector2.ONE * SPRITE_SCALE
+
+	# 朝向决定贴图左右翻转。
+	# ★ 只改 sprite.flip_h，**绝不改节点 rotation**（rotation 恒为 0 —— 人物不翻倒）。
+	if velocity.x < -FLIP_SPEED_THRESHOLD:
+		sprite.flip_h = true
+	elif velocity.x > FLIP_SPEED_THRESHOLD:
+		sprite.flip_h = false
 
 
 ## 本机是不是这个节点的「移动权威」（输入归谁算）。

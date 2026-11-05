@@ -29,10 +29,10 @@ const PENALTY_TOKENS := ["penalty", "penalized", "score", "score_delta",
 ## 两字母的惩罚性 token 必须按**词边界**匹配（子串扫会误伤无关标识符）。
 const PENALTY_WORD_TOKENS := ["hp"]
 
-## char_*.png 的不透明像素包围盒（**闭区间**口径）= (14, 7, 50, 63)
-## → 画布内 alpha 中心 x = 32.0、alpha 底边 = 64（= 画布高度）。
-const ALPHA_CENTER_X := 32.0
-const ALPHA_BOTTOM := 64.0
+## char_*.png 的不透明像素包围盒（**闭区间**口径）= (35, 0, 91, 127)
+## → 画布内 alpha 中心 x = 63.0、alpha 底边 = 128（= 画布高度）。
+const ALPHA_CENTER_X := 64.0
+const ALPHA_BOTTOM := 128.0
 
 ## 押送到达出生点的容差（与 scripts/player.gd 的常量同值）。
 const ESCORT_TOLERANCE := 8.0

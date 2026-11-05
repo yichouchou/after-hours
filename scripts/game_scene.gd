@@ -68,11 +68,19 @@ const PlayerScript := preload("res://scripts/player.gd")
 ##   这是**刻意的选择**：宁可晚 1 秒，也不要客户端整局看不到人。
 const REMOTE_SPAWN_DELAY_SEC := 1.2
 
-## 地面贴图（256×256 的草地，用 region + repeat 平铺成整张地图）。
-const GROUND_TEXTURE := "res://assets/ground/ground_grass.png"
+## 地面贴图：960×576 的**整张地图图**（草地 + 手绘土路 + 边缘压暗，由
+## tools/bake_map_ground.py 离线烘焙）。不再运行时平铺 —— 平铺会在每条路
+## 边缘露出 32px 的方块接缝。
+const GROUND_TEXTURE := "res://assets/ground/map_ground.png"
+
+## 地图尺寸（格）。地面是 1x 贴图，30×18 格 × 32px = 960×576。
+const MAP_TILES := Vector2i(30, 18)
 
 ## 道具贴图格式：res://assets/props/prop_<tag>.png。
 const PROP_TEXTURE_FORMAT := "res://assets/props/prop_%s.png"
+
+## 路灯点光源的贴图（256×256 径向渐变）。
+const LIGHT_TEXTURE := "res://assets/light/lamp_light.png"
 
 ## 玩家出生点（**格坐标**）。第 0 个 = (2,9) → 世界坐标 (64, 288)，
 ## 与既有测试夹具一致。6 个点两两不同、都在地图内、
@@ -194,12 +202,24 @@ func _build_props(props: Dictionary) -> void:
 			p.set("prop_tag", StringName(str(tag)))
 			p.set("prop_id", prop_id)
 			p.position = pos
-			var sprite := p.get_node_or_null("Sprite2D") as Sprite2D
-			if sprite != null:
-				var tex := load(PROP_TEXTURE_FORMAT % String(tag))
-				if tex != null:
-					sprite.texture = tex
 			props_root.add_child(p)
+			# ★ 素材按 2x 出图 + 自动锚定：每种道具贴图尺寸不同，
+			#   交给道具自己的 apply_texture() 重算 offset（水平居中、底边贴地）。
+			var tex := load(PROP_TEXTURE_FORMAT % String(tag))
+			if tex != null:
+				p.call(&"apply_texture", tex)
+			# 路灯挂**真的**点光源：熄灯 → 光池消失（画面与玩法同源，见
+			# scripts/mischief_prop.gd 的 _process → Interaction.is_lamp_on()）。
+			if StringName(str(tag)) == &"lamp":
+				var light := PointLight2D.new()
+				light.name = "PointLight2D"
+				light.texture = load(LIGHT_TEXTURE)
+				light.color = Color(1.0, 0.92, 0.72)
+				light.texture_scale = 1.25   # 256px 渐变 → 光池半径 ≈ 160 px
+				# 光池落在**地面**上（道具是侧视）：光源挂在灯柱上段，
+				# 半径足够大 → 灯下有一圈暖光，灯头周围也有光晕。
+				light.position = Vector2(0, -40)
+				p.add_child(light)
 			prop_id += 1
 
 
@@ -341,6 +361,12 @@ func _spawn_player_node(data: Variant) -> Node:
 func _attach_camera(player: Node) -> void:
 	var cam := Camera2D.new()
 	cam.name = CAMERA_NODE_NAME
+	# ★ 把相机钳在地图内：玩家出生在最左列（tile 2,9），不钳制的话视口会向左
+	#   溢出地图，画面左边 40% 直接露出 clear color（黑虚空）。
+	cam.limit_left = 0
+	cam.limit_top = 0
+	cam.limit_right = MAP_TILES.x * WorldMap.TILE
+	cam.limit_bottom = MAP_TILES.y * WorldMap.TILE
 	# 先不启用：节点进树之后再按本地与否打开（相机不在树里时不能 enable）。
 	cam.enabled = false
 	player.add_child(cam)
