@@ -379,9 +379,16 @@ func _try_start_mischief() -> void:
 		interact_radius)
 	if hit.is_empty():
 		return
-	var m := _find_behavior(StringName(str(hit.get("tag", ""))))
+	# ★ 按**道具的 tag**找手牌（**不是**按 id）——
+	#   道具那边给的是 tag（"carrot"），行为这边认的是 id（"steal_carrot"）。
+	#   两套口径对不上 → 永远查不到 → 捣蛋开不了头
+	#   （2026-11-05 用户报障：「只能乱逛不能捣乱」）。
+	var m := Interaction.find_behavior_for_tag(hand, StringName(str(hit.get("tag", ""))))
 	if m == null:
 		return
+	# ★ 手上那一条记的是**行为的 id**（不是 tag）：
+	#   提交给房主走的是 rpc.send_submit_mischief(behavior_id, target_id)，
+	#   房主那边也是按 id 查行为表 → 这里必须存 id。
 	current_behavior_id = m.id
 	current_target_id = int(hit.get("id", 0))
 	current_mischief_progress = 0.0

@@ -799,6 +799,99 @@ func _boot() -> void:
 				"[§4-13] %s 不出现惩罚性 token「%s」（独立词）" % [path, token])
 
 	# ==================================================================
+	# [§4-28] ★★ 按住 E 能**真的开一条捣蛋**（tag 与 id 两套口径不许错配）
+	#
+	# 背景（2026-11-05 用户报障：「只能乱逛不能捣乱」）：
+	#   玩家站在道具上、手里有对得上的牌、E 也按住了，
+	#   但 current_behavior_id 一直是空的 → 进度永远不动 → 捣蛋开不了头。
+	#   根因：道具那边给的是 **tag**（"carrot"），
+	#         而查手牌用的是**行为的 id**（"steal_carrot"）
+	#         → 两套口径永远对不上 → 查不到 → return。
+	#
+	# ★ 这条**端到端**钉住：站位 + 按键 + 牌 + 道具全都到位时，
+	#   捣蛋必须真的开起来（不许只测某个零件）。
+	# ★ 玩家必须是**本地权威**（移动与捣蛋都只由拥有者算）。
+	# ==================================================================
+	# ★ 用**脚本内省**查静态方法（Interaction 是 class_name，不是实例，
+	#   不能直接 has_method）。
+	var interaction_script := load(INTERACTION_SRC) as GDScript
+	var has_tag_api := false
+	if interaction_script != null:
+		for meth in interaction_script.get_script_method_list():
+			if str(meth.get("name", "")) == "find_behavior_for_tag":
+				has_tag_api = true
+	_fails += _check(has_tag_api,
+		"[§4-28] Interaction 提供 find_behavior_for_tag()（按道具 tag 找手牌）")
+	if has_tag_api:
+		# ★ 纯函数层的行为断言（tag → id 的翻译本身）
+		var hand_two: Array = [
+			_make_behavior_tagged(&"steal_carrot", &"carrot", 1.5, false),
+			_make_behavior_tagged(&"noise_pot", &"pot", 0.5, false),
+		]
+		var found_carrot := Interaction.find_behavior_for_tag(hand_two, &"carrot")
+		_fails += _check(found_carrot != null and found_carrot.id == &"steal_carrot",
+			"[§4-28] 按道具的 tag 查到**对得上的那张牌**（carrot → steal_carrot）")
+		_fails += _check(Interaction.find_behavior_for_tag(hand_two, &"lamp") == null,
+			"[§4-28] 没有对得上的牌 → 返回 null（不乱开）")
+		# 一手牌里两张卡打同一个道具（prank_pot 与 noise_pot 的 target_tag 都是 pot）
+		var hand_pots: Array = [
+			_make_behavior_tagged(&"prank_pot", &"pot", 2.0, false),
+			_make_behavior_tagged(&"noise_pot", &"pot", 0.5, false),
+		]
+		var found_pot := Interaction.find_behavior_for_tag(hand_pots, &"pot")
+		_fails += _check(found_pot != null and found_pot.id == &"prank_pot",
+			"[§4-28] 两张卡打同一个道具 → 取**手牌顺序里的第一张**（确定、可预期）")
+	if player_packed != null and prop_packed != null:
+		var e2e_props := Node2D.new()
+		e2e_props.name = "PropsE2E"
+		root.add_child(e2e_props)
+		var e2e_prop = prop_packed.instantiate()
+		e2e_prop.prop_tag = &"carrot"
+		e2e_prop.prop_id = 77
+		e2e_prop.position = Vector2(500, 400)
+		e2e_props.add_child(e2e_prop)
+		var e2e_player = player_packed.instantiate()
+		e2e_player.name = "9"
+		e2e_player.position = Vector2(500, 400)
+		root.add_child(e2e_player)
+		await process_frame
+		# 权威设成本机（peer id 1）：捣蛋只由**拥有者**推进。
+		e2e_player.set_multiplayer_authority(1)
+		e2e_player.call(&"set_props_root", e2e_props)
+		e2e_player.call(&"set_hand", [_make_behavior(&"steal_carrot", 1.5, false)])
+		await process_frame
+
+		# 按住 E
+		var key_ev := InputEventKey.new()
+		key_ev.keycode = KEY_E
+		key_ev.physical_keycode = KEY_E
+		key_ev.pressed = true
+		Input.parse_input_event(key_ev)
+		await process_frame
+		_fails += _check(Input.is_key_pressed(KEY_E),
+			"[§4-28] 前提：E 键按住了")
+		for i in 12:
+			await physics_frame
+		_fails += _check(StringName(str(e2e_player.get("current_behavior_id"))) == &"steal_carrot",
+			"[§4-28] 站在对得上的道具上按住 E → 捣蛋**开得起来**"
+			+ "（current_behavior_id = '%s'，期望 'steal_carrot'）"
+			% str(e2e_player.get("current_behavior_id")))
+		_fails += _check(int(e2e_player.get("current_target_id")) == 77,
+			"[§4-28] 捣蛋锁定的是**眼前那个道具**（current_target_id = %d，期望 77）"
+			% int(e2e_player.get("current_target_id")))
+		_fails += _check(float(e2e_player.get("current_mischief_progress")) > 0.0,
+			"[§4-28] 进度真的在涨（%.3f）"
+			% float(e2e_player.get("current_mischief_progress")))
+		# 松开 E（别把按键状态留给后面的断言）
+		key_ev.pressed = false
+		Input.parse_input_event(key_ev)
+		await process_frame
+		e2e_player.queue_free()
+		e2e_prop.queue_free()
+		e2e_props.queue_free()
+		await process_frame
+
+	# ==================================================================
 	# 收尾：释放实例
 	# ==================================================================
 	if player != null:
@@ -839,6 +932,18 @@ func _make_behavior(id: StringName, duration: float, needs_partner: bool) -> Mis
 	m.needs_partner = needs_partner
 	m.duration = duration
 	m.points = 10
+	return m
+
+
+## 造一个行为（**可指定 target_tag**）。
+##
+## ★ 与 _make_behavior() 的区别只有 target_tag ——
+##   tag（道具那边）与 id（行为这边）是**两套口径**，测它们之间的翻译时
+##   必须能分别指定（§4-28）。
+func _make_behavior_tagged(id: StringName, target_tag: StringName, duration: float,
+		needs_partner: bool) -> Mischief:
+	var m := _make_behavior(id, duration, needs_partner)
+	m.target_tag = target_tag
 	return m
 
 

@@ -72,6 +72,28 @@ static func find_nearest_by_data(player_pos: Vector2, entries: Array, radius: fl
 	return best
 
 
+## 在**手牌**里找一张能作用在这个道具上的行为（按道具的 tag 匹配）。
+##
+## ★ 为什么必须有这个函数（2026-11-05 用户报障「只能乱逛不能捣乱」）：
+##   道具那边给的是 **tag**（"carrot"），行为这边认的是 **id**（"steal_carrot"）。
+##   拿 tag 去比 id **永远查不到** → 玩家站在道具上、按着 E、手里也有对得上的牌，
+##   进度却一动不动 → 捣蛋根本开不了头。
+##   → 这两套口径必须在这里**翻译一次**。
+##
+## hand 的元素是 Mischief（纯数据）。
+## 返回**手牌顺序里的第一张**对得上的行为；没有就返回 null。
+##
+## ★ 一手牌里可能有多张卡作用在同一个道具上
+##   （例如 prank_pot 与 noise_pot 的 target_tag 都是 "pot"）
+##   → 取第一张（确定、可预期）；做完清掉那张，下一张自然接上。
+static func find_behavior_for_tag(hand: Array, tag: StringName) -> Mischief:
+	for b in hand:
+		var m := b as Mischief
+		if m != null and m.target_tag == tag:
+			return m
+	return null
+
+
 ## 捣蛋一条行为**实际要花的时间**（秒）。
 ##
 ## 规则（控制器裁定）：
