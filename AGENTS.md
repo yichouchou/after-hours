@@ -7,6 +7,8 @@
 
 对本项目做的**任何** Godot 开发与优化操作——读场景树、改节点属性、写/改脚本、把游戏跑起来看效果、截图取证、查日志——都必须在**正在运行的 Godot 编辑器**里通过 godot-ai MCP 桥接完成。**不要再写一次性 PowerShell / GDScript 探针去旁路编辑器。**
 
+例外：headless 测试不是编辑器操作，仍走 `tools/run_tests.ps1`（桥接也不跑测试套件）。
+
 - MCP 配置（已就绪）：`D:\minimax-code\agent-space\.minimax\mcp.json` → `mcpServers.godot-ai`，stdio，`command = C:\Users\75996\.local\bin\godot-ai.exe`，`args = ["attach"]`
 - 编辑器插件：`addons/godot_ai/`（v4.4.1）。插件必须由用户在编辑器 UI 里启用——编辑器自己写 `[editor_plugins]` 与 `_mcp_game_helper` autoload，外部改写 `project.godot` 会被运行中的编辑器覆盖
 - 后端由插件拉起并持有（HTTP 8000 / WS 9500，带 `--owner-pid`）。**不要自己另起一个 attach 后端**去抢端口

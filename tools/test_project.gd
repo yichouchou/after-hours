@@ -16,9 +16,12 @@ func _boot() -> void:
 	fails += _check(cfg.get_value("display", "window/size/viewport_width", 0) == 640, "逻辑宽度 640")
 	fails += _check(cfg.get_value("display", "window/size/viewport_height", 0) == 360, "逻辑高度 360")
 	fails += _check(cfg.get_value("display", "window/stretch/mode", "") == "canvas_items", "拉伸模式 canvas_items")
-	fails += _check(cfg.get_value("display", "window/stretch/aspect", "") == "keep", "拉伸宽高比 keep")
 	fails += _check(cfg.get_value("rendering", "renderer/rendering_method", "") == "gl_compatibility", "gl_compatibility 后端")
-	fails += _check(cfg.get_value("rendering", "textures/canvas_textures/default_texture_filter", 0) == 1, "纹理过滤为 Linear(1)")
+	# 这两项与引擎默认值相同，Godot 编辑器保存 project.godot 时**不再写进文件**，
+	# 所以要读**生效值**（ProjectSettings）而不是解析文件文本；否则编辑器改写一次
+	# project.godot 就会把这两条断言变成假失败。
+	fails += _check(ProjectSettings.get_setting("display/window/stretch/aspect", "") == "keep", "拉伸宽高比 keep")
+	fails += _check(ProjectSettings.get_setting("rendering/textures/canvas_textures/default_texture_filter", 0) == 1, "纹理过滤为 Linear(1)")
 
 	# 2) 主场景可实例化 + Router 自动加载已注册
 	var packed: PackedScene = load("res://scenes/main.tscn")
