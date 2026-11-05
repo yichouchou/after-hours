@@ -508,6 +508,37 @@ func _boot() -> void:
 		"join 失败后再点一次加入房间能成功（实际 %d）" % e4b)
 
 	# ==================================================================
+	# 7b. 「创建房间 → 再点加入房间」不许把服务端 peer 换成客户端 peer
+	#
+	# 用户报障：先点「创建房间」（成功建房），再点「加入房间」→
+	#   join 会把 transport 的 peer 换成**客户端** peer → 房主身份当场丢失，
+	#   刚建好的房间（以及已经连进来的人）一起没了。
+	#
+	# ★ 两种操作顺序统一成「**先成功的那个算数**」：
+	#   「加入 → 创建」由 host_game() 停掉连接的连接超时计时器（已有裁决）；
+	#   「创建 → 加入」由 join_game() 拒绝加入来兜（**本节新增**）。
+	# ==================================================================
+	var s_guard = _new_session()
+	s_guard.set_transport(ENetTransport.new())
+	var r_guard := _host_on(s_guard)
+	var guard_port: int = int(r_guard["port"])
+	_fails += _check(r_guard["err"] == OK, "前提：Session 托管成功")
+	_fails += _check(s_guard.is_host(), "前提：Session 是 host")
+	var peer_before: Variant = s_guard.get("_transport").get_peer()
+	_fails += _check(peer_before != null, "前提：transport 上有一个服务端 peer")
+	var e_join := s_guard.join_game("127.0.0.1", guard_port)
+	_fails += _check(e_join != OK,
+		"已是房主时 join_game 必须拒绝（返回非 OK，实际 %d）" % e_join)
+	_fails += _check(s_guard.is_host(),
+		"已是房主时 join_game 之后仍然是 host（房主身份没被换掉）")
+	_fails += _check(s_guard.get("_transport").get_peer() == peer_before,
+		"已是房主时 join_game 之后**服务端 peer 原地未动**")
+	_fails += _check(s_guard.peer_count() == 1,
+		"已是房主时 join_game 之后房主自己仍算 1 人，实际 %d" % s_guard.peer_count())
+	_fails += _check(s_guard.peers() == [1],
+		"已是房主时 join_game 之后名单仍只有自己，实际 %s" % str(s_guard.peers()))
+
+	# ==================================================================
 	# 8. 大厅界面：对局场景缺失时**不许**开局（不许留半成品）
 	#    对局场景缺失时开回合，就会留下「回合开了但人还在大厅」的半成品。
 	#    ★ 这里**注入一个假路径**（而不是依赖「res://scenes/game.tscn 恰好还不存在」）：

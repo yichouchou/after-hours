@@ -330,6 +330,59 @@ func _boot() -> void:
 		owned.set_multiplayer_authority(PlayerScript.resolve_authority(owned.name))
 
 		# ==================================================================
+		# [§4-12-C] ★ 远端化身随位置差左右翻转（B4）
+		#
+		# 背景：MultiplayerSynchronizer 只同步 ".:position"（player.tscn 的
+		#   SceneReplicationConfig 只有一条属性），远端机器上 **velocity 恒为 0**
+		#   → 拥有者分支那套「按 velocity.x 决定翻转」永远不触发
+		#   → **别人的角色永远朝右**，往左走也是朝右（用户报障）。
+		# 修法：非拥有者分支按「位置差 / delta」还原速度，复用同一个阈值。
+		#
+		# ★ 这里**手动改 position** 来模拟同步器把新位置推过来
+		#   （headless 单进程里没有第二个 peer，真同步器跑不起来）。
+		# ★ 每次断言前都**显式**把 flip_h 设成相反值 → 断言的是"翻转了"，
+		#   不是"碰巧本来就是这个值"。
+		# ==================================================================
+		var remote_sprite = owned.get_node_or_null("Sprite2D") as Sprite2D
+		_fails += _check(remote_sprite != null, "[§4-12-C] 远端化身能拿到 Sprite2D")
+		if remote_sprite != null:
+			_fails += _check(not owned.is_multiplayer_authority(),
+				"[§4-12-C] 前提：权威不是自己（走非拥有者分支）")
+			# 先调一次 → 让脚本把当前 position 记成基线（后面的位移才是干净的）
+			var base_pos: Vector2 = owned.position
+			owned.call("_physics_process", 0.016)
+
+			# 往右挪 → 化身朝右（flip_h == false）
+			remote_sprite.flip_h = true
+			owned.position = base_pos + Vector2(40.0, 0.0)
+			owned.call("_physics_process", 0.016)
+			_fails += _check(remote_sprite.flip_h == false,
+				"[§4-12-C] 远端化身往右走 → 面向右（flip_h == false）")
+
+			# 往左挪 → 化身朝左（flip_h == true）
+			remote_sprite.flip_h = false
+			owned.position = base_pos + Vector2(-40.0, 0.0)
+			owned.call("_physics_process", 0.016)
+			_fails += _check(remote_sprite.flip_h == true,
+				"[§4-12-C] 远端化身往左走 → 面向左（flip_h == true）")
+
+			# 速度死区：几乎不动 → 保持上一次朝向（不抖）
+			remote_sprite.flip_h = true
+			owned.position = base_pos + Vector2(-39.95, 0.0)
+			owned.call("_physics_process", 0.016)
+			_fails += _check(remote_sprite.flip_h == true,
+				"[§4-12-C] 远端化身几乎不动 → 保持上一次朝向（速度死区）")
+
+			# 远端分支**不许**写 position / velocity（同步器才是位置的唯一来源）
+			var rp_before: Vector2 = owned.position
+			var rv_before: Vector2 = owned.velocity
+			owned.call("_physics_process", 0.016)
+			_fails += _check(owned.position == rp_before and owned.velocity == rv_before,
+				"[§4-12-C] 远端分支不写 position/velocity（位置只由同步器给）"
+				+ "（position %s → %s，velocity %s → %s）"
+				% [str(rp_before), str(owned.position), str(rv_before), str(owned.velocity)])
+
+		# ==================================================================
 		# [F1] 贴图与碰撞体必须重合：脚底落在 y = 0，视觉中心基本居中。
 		#
 		# 背景：Sprite2D.centered 的默认值是 **true**，而场景里的

@@ -71,6 +71,21 @@ signal escort_finished(peer_id: int)
 var _bob: float = 0.0
 var _spawn_position_set := false
 
+## 上一次的位置（**只在非拥有者分支更新**）。
+##
+## ★ 远端化身的速度只能靠「位置差 / delta」还原：
+##   MultiplayerSynchronizer 只同步 ".:position"（player.tscn 的
+##   SceneReplicationConfig 只有这一条属性）→ 远端机器上 **velocity 恒为 0**
+##   → 拥有者分支那套「按 velocity.x 决定翻转」永远不触发
+##   → **别人的角色永远朝右**，往左走也是朝右（用户报障）。
+##
+## ★ 为什么**只在非拥有者分支更新**：
+##   拥有者分支已经用 velocity 判方向了，用不着它；
+##   而「押送期间玩家脚本变量除 escorted / _bob 外零变化」这条**既有**断言
+##   （tools/test_guard_flow.gd [§3-9]、tools/test_interaction.gd [§4-19]）
+##   要求拥有者分支**不许**改动任何别的变量 → 拥有者分支绝不碰它。
+var _last_position := Vector2.ZERO
+
 
 ## ── 捣蛋交互（Task 10）──────────────────────────────────────────────────
 ##
@@ -156,6 +171,8 @@ func _ready() -> void:
 	# 出生点兜底：Task 11 注入真值之前，用进场时的位置。
 	if not _spawn_position_set and spawn_position == Vector2.ZERO:
 		spawn_position = position
+	# 远端朝向的基准位置（见 _last_position 的说明）。
+	_last_position = position
 
 
 ## 注入自己的出生点（Task 11 按「每人固定位置」调用）。
@@ -213,6 +230,7 @@ func _physics_process(delta: float) -> void:
 		# 非拥有者：位置由同步器提供，只做表现（不写自己的 position / velocity）
 		_bob += delta * 8.0
 		sprite.position.y = -absf(sin(_bob)) * 2.0
+		_update_remote_facing(delta)
 		return
 
 	var dir := Vector2.ZERO
@@ -248,6 +266,24 @@ func _physics_process(delta: float) -> void:
 	if velocity.x < -FLIP_SPEED_THRESHOLD:
 		sprite.flip_h = true
 	elif velocity.x > FLIP_SPEED_THRESHOLD:
+		sprite.flip_h = false
+
+
+## 远端化身的方向：按「位置差 / delta」还原速度 → 决定左右翻转。
+##
+## ★ 远端机器上 velocity 恒为 0（同步器只同步位置），
+##   所以只能靠相邻两帧的**位置差**反推速度。
+## ★ 复用同一个 FLIP_SPEED_THRESHOLD 死区：几乎不动 → 保持上一次朝向（不抖）。
+## ★ **只改 sprite.flip_h**，绝不改节点 rotation（见 FLIP_SPEED_THRESHOLD 的说明）。
+## ★ 只在非拥有者分支调用（拥有者分支用 velocity 判方向，且不许动 _last_position ——
+##   见 _last_position 的说明）。
+func _update_remote_facing(delta: float) -> void:
+	var dx := position.x - _last_position.x
+	_last_position = position
+	var vx := dx / maxf(delta, 0.0001)
+	if vx < -FLIP_SPEED_THRESHOLD:
+		sprite.flip_h = true
+	elif vx > FLIP_SPEED_THRESHOLD:
 		sprite.flip_h = false
 
 

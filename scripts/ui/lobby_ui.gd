@@ -130,11 +130,25 @@ func _on_join() -> void:
 	_connect_session_signals()
 	var err := _session.join_game(JOIN_ADDRESS)
 	if err != OK:
-		_status.text = "加入失败（地址不对？）"
+		# ★ Session 会给出**具体**原因（例如「你已经创建了房间，不用再加入」）；
+		#   没有具体原因才回退到通用文案（别让玩家对着「加入失败」猜）。
+		_status.text = _join_failure_text()
 		return
 	# **先 join 成功，再挂到 MultiplayerAPI**（同上）。
 	_session.apply_to_multiplayer()
 	_status.text = "正在加入…"
+
+
+## 加入失败时给玩家看的一句话。
+##
+## ★ 优先用 Session.failure_reason()（它知道到底是"已经建房了"还是"连不上"）；
+##   没有就说通用的一句 —— 状态栏必须**说清楚**，别让玩家猜。
+func _join_failure_text() -> String:
+	if _session != null and _session.has_method(&"failure_reason"):
+		var reason := str(_session.call(&"failure_reason"))
+		if not reason.is_empty():
+			return reason
+	return "加入失败（地址不对？）"
 
 
 func _on_start() -> void:

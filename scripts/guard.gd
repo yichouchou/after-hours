@@ -91,6 +91,10 @@ var _returning_home := false
 ## 直接注入的灯列表（元素形如 {"position": Vector2, "on": bool}）。
 var _injected_lamps: Array = []
 var _broadcast_accum := 0.0
+## 听到的动静发生在哪（世界坐标）。
+var _noise_pos := Vector2.ZERO
+## 动静还能被听见多久（秒）；≤ 0 = 已经听不见了。
+var _noise_timer := 0.0
 
 
 func _ready() -> void:
@@ -107,6 +111,10 @@ func _physics_process(delta: float) -> void:
 	if not PeerState.is_local_host(multiplayer):
 		return
 
+	# 动静会衰减：听见一阵就忘了（不然守卫会一直记着那一嗓子）。
+	if _noise_timer > 0.0:
+		_noise_timer = maxf(0.0, _noise_timer - delta)
+
 	var st := brain.state
 	if _returning_home:
 		# 回岗位：只走路，不跑感知（大脑的 RETURN → PATROL 迁移由场景层收尾）。
@@ -120,6 +128,10 @@ func _physics_process(delta: float) -> void:
 			GuardBrain.State.PATROL:
 				_patrol(delta)
 			GuardBrain.State.SUSPICIOUS:
+				# ★ 听到动静 → 朝**声音传来的方向**走过去看看。
+				#   不指方向的话，守卫只是"心里起疑"却站在原地，敲锅等于白敲。
+				if _noise_timer > 0.0:
+					_target_position = _noise_pos
 				_move_towards(_target_position, delta)
 			GuardBrain.State.CHASE:
 				var tp := _player_position(int(result["target_peer"]))
@@ -193,8 +205,8 @@ func _sense_context() -> Dictionary:
 		"guard_facing": facing,
 		"player_pos": player_pos,
 		"player_visible": visible,
-		"noise_pos": Vector2.ZERO,
-		"noise_active": false,
+		"noise_pos": _noise_pos,
+		"noise_active": _noise_timer > 0.0,
 		"sight_range": sight_range,
 		"sight_angle_deg": sight_angle_deg,
 		"hearing_range": hearing_range,
@@ -235,6 +247,21 @@ func _lamp_is_on(n: Node) -> bool:
 ## 注入玩家容器。
 func set_player_root(node: Node2D) -> void:
 	player_root = node
+
+
+## 房主：世界里某处**制造了动静**（敲锅之类）→ 告诉守卫「那边有声音」。
+##
+## ★ 这条通道是「制造噪音」这类行为**唯一**能惊动守卫的入口：
+##   大脑（scripts/game/guard_brain.gd）从 Task 4 起就支持 ctx 的
+##   noise_pos / noise_active（听觉分支 → 怀疑度上升 → SUSPICIOUS），
+##   但场景层一直写死「noise_active = false」
+##   → 「敲响酒馆的锅」这张牌**根本不会**惊动老陈（用户报障）。
+## ★ 只有**房主**跑这套（守卫 AI 是房主权威）；
+##   客户端靠 guard_state 广播看表现，不自己判。
+## ★ duration = 动静还能被听见多久（秒）；过了就衰减掉。
+func hear_noise(pos: Vector2, duration: float) -> void:
+	_noise_pos = pos
+	_noise_timer = maxf(duration, 0.0)
 
 
 ## 注入路灯容器（Task 10 把灯拔掉时改它们的 lamp_on / meta "lamp_on"）。

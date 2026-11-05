@@ -291,6 +291,69 @@ func _boot() -> void:
 			"[§4-17] game_scene.gd 没有把 guard_wire_id 写死成 1")
 
 	# ==================================================================
+	# [§4-22] 清单面板不许吃掉左侧太多画面
+	#
+	# 视口只有 640 px 宽（玩家永远在正中），原来清单面板 200 px（≈31%），
+	# 标题一长就压到画面中央 → 收窄到 ≤ 160 px（≤ 25%）。
+	#
+	# ★ 量的是**最坏情况**：清单里放**最长的那条标题**
+	#   （「把长椅搬到池塘边看日落」，11 个字）——
+	#   光改 offset_right 没用！VBoxContainer 的 size 会被子节点的**最小宽度**
+	#   顶开（Control.size 不小于 get_combined_minimum_size()）：
+	#   不换行的话这一行要 191 px → 面板被顶成 191 px，"收窄"等于白做。
+	#   → 清单标题必须**换行**显示（见 scripts/ui/hud.gd 的 set_card_list）。
+	#   （实测：.superpowers/sdd/.../_tmp_task14/probe_hud_cardlist.gd）
+	# ==================================================================
+	var card_panel: Control = null
+	if hud != null:
+		card_panel = hud.get_node_or_null("CardList") as Control
+	_fails += _check(card_panel != null, "[§4-22] HUD 有 CardList 节点")
+	if card_panel != null:
+		var longest_title: Array[String] = ["把长椅搬到池塘边看日落"]
+		hud.call(&"set_card_list", longest_title)
+		await process_frame
+		_fails += _check(card_panel.size.x <= 160.0,
+			"[§4-22] 最长标题下清单面板宽度 ≤ 160 px（视口 640 → ≤ 25%%），实际 %.0f"
+			% card_panel.size.x)
+		# 标题必须**换行**才读得完（不许被裁掉、不许画到画面中央）
+		var max_lines := 0
+		for child in card_panel.get_children():
+			var lbl := child as Label
+			if lbl != null:
+				max_lines = maxi(max_lines, lbl.get_line_count())
+		_fails += _check(max_lines >= 2,
+			"[§4-22] 最长的标题换行显示（读得完），实际行数 %d" % max_lines)
+		game.call(&"_refresh_hud")
+
+	# ==================================================================
+	# [§4-23] ★ 敲锅真的能惊动守卫（噪音通道）
+	#
+	# 背景：守卫大脑早就支持 ctx 的 noise_pos / noise_active
+	#（scripts/game/guard_brain.gd 的听觉分支），
+	# 但场景层一直写死「noise_active = false」
+	# → 「敲响酒馆的锅」这张牌根本不会惊动老陈。
+	# → 本条钉住：房主裁决成功 → 世界效果把噪音送到守卫 → ctx 里真的有噪音。
+	# ==================================================================
+	var rpc_node := game.get_node_or_null("RPC")
+	var pot_node: Node2D = null
+	for child in prop_nodes:
+		if StringName(str(child.get("prop_tag"))) == &"pot":
+			pot_node = child as Node2D
+			break
+	_fails += _check(pot_node != null, "[§4-23] 地图上找得到花盆（噪音的来源）")
+	if rpc_node != null and pot_node != null and guard != null:
+		var ctx_before: Dictionary = guard.call(&"_sense_context")
+		_fails += _check(not bool(ctx_before.get("noise_active", false)),
+			"[§4-23] 前提：还没有噪音时 noise_active 为 false")
+		rpc_node.call(&"_apply_world_effect", &"noise_pot", int(pot_node.get("prop_id")))
+		var ctx_after: Dictionary = guard.call(&"_sense_context")
+		_fails += _check(bool(ctx_after.get("noise_active", false)),
+			"[§4-23] 敲锅成功后守卫真的听到了噪音（noise_active 变 true）")
+		_fails += _check(Vector2(ctx_after.get("noise_pos", Vector2.ZERO)) == pot_node.global_position,
+			"[§4-23] 噪音位置 == 花盆的位置（实际 %s，期望 %s）"
+			% [str(ctx_after.get("noise_pos", Vector2.ZERO)), str(pot_node.global_position)])
+
+	# ==================================================================
 	# [§4-21] ★ 守卫编号**不是写死的默认值**（修复轮 1 Important 2：断言强度）
 	# ==================================================================
 	# ① 静态兜底：源码的**代码部分**里必须出现**带限定前缀与调用括号**的形式

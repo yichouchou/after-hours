@@ -43,6 +43,18 @@ func _on_finish_pressed() -> void:
 
 
 ## 设置清单（每行一条）。空数组 = 清空。
+##
+## ★ 每行**换行显示**（autowrap）+ **裁掉溢出**（clip_text）：
+##   清单面板只有 150 px 宽（视口 640 → ≈23%），而最长的标题
+##   「把长椅搬到池塘边看日落」有 11 个字 —— 不换行的话这一行要 191 px，
+##   而 **VBoxContainer 的 size 会被子节点的最小宽度顶开**
+##   （Control.size 不小于 get_combined_minimum_size()）
+##   → 面板被顶成 191 px，"收窄"等于白做，标题照样压到画面中央
+##   （玩家永远在正中，那正是最不该被字挡住的地方）。
+##   → 换行之后标签的最小宽度回到 1 px，面板才真的保持 150 px。
+##   （实测数据见 .superpowers/sdd/.../_tmp_task14/probe_hud_cardlist.gd）
+##   字号在 hud.tscn 里用 theme_override_font_sizes/font_size = 13 定死
+##   （对这个 VBoxContainer 生效 → 所有子 Label 都继承它）。
 func set_card_list(titles: Array[String]) -> void:
 	for c in _card_list.get_children():
 		# 先摘下来再释放：queue_free 要到帧末才生效，
@@ -52,6 +64,8 @@ func set_card_list(titles: Array[String]) -> void:
 	for i in titles.size():
 		var l := Label.new()
 		l.text = "□ %s" % titles[i]
+		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		l.clip_text = true
 		_card_list.add_child(l)
 
 

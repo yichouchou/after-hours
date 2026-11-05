@@ -21,6 +21,16 @@ extends Node
 ## 房主的 peer id 恒为 1（ENet server-relay）。
 const HOST_PEER_ID := 1
 
+## 「制造动静」这类行为的 category（data/mischief.json 里只有 noise_pot 属于它）。
+const NOISE_CATEGORY := "noise"
+
+## 动静持续多久（秒）。
+##
+## ★ 够守卫的怀疑度越过阈值：GuardBrain.SUSPICION_GAIN 2.0/s ×
+##   SUSPICION_THRESHOLD 0.5 → 听见 0.25 s 就够起疑；
+##   这里给 1.5 s，够守卫从"听见"走到"起疑"再走两步。
+const NOISE_DURATION := 1.5
+
 ## 「这个玩家被守卫抓了」（房主 → 所有人）。
 ## 名字带 _evt 后缀是为了不和同名 RPC 方法 player_caught 抢标识符。
 signal caught_player_evt(peer_id: int, guard_id: int)
@@ -328,13 +338,23 @@ func set_lamp_state(target_id: int, on: bool) -> void:
 	Interaction.set_lamp_on(lamp, on)
 
 
-## 房主：裁决成功之后**改世界**（本轮只有「拔路灯」一条有世界效果）。
+## 房主：裁决成功之后**改世界**。
 ##
 ## ★ 只在 success == true 时才被调用（落败方**不产生任何后果** —— 零失败惩罚）。
 ## ★ 灯的状态**只**写 meta "lamp_on"（Interaction.set_lamp_on 是**唯一**入口）：
 ##   不许引入第二套灯状态，也不许碰 guard.set_lamps()
 ##   （双通道 → 同一盏灯被算两遍 → light_factor 变成 0.36 而不是 0.6）。
+##
+## ★ 派发口径：**先按 category 认「有世界效果」的那一类**（"noise"），
+##   其余按 behavior_id 精确匹配。
+##   —— 绝不能把 "mess" 整类都当成「拔路灯」：
+##     mess_chairs / mess_barrel 的 category 也是 "mess"，
+##     但它们**没有**世界效果（不许自己发明：例如「偷走萝卜就把萝卜删掉」）。
 func _apply_world_effect(behavior_id: StringName, target_id: int) -> void:
+	var m := _find_behavior(behavior_id)
+	if m != null and String(m.category) == NOISE_CATEGORY:
+		_apply_noise_effect(target_id)
+		return
 	if behavior_id != &"mess_lamps":
 		return
 	var lamp := _find_prop_by_id(target_id)
@@ -344,6 +364,30 @@ func _apply_world_effect(behavior_id: StringName, target_id: int) -> void:
 	Interaction.set_lamp_on(lamp, false)
 	# ★ 再通知远端客户端（纯数据载荷：int + bool）。
 	set_lamp_state.rpc(target_id, false)
+
+
+## 「制造动静」的世界效果：让守卫**真的听见**。
+##
+## ★ 守卫 AI 只在房主跑 → 这里也只在房主生效；
+##   客户端靠 guard_state 广播看表现（不自己判）。
+## ★ 噪音位置 = 目标道具的**世界坐标**（玩家在哪儿敲的）。
+## ★ 动静会衰减（scripts/guard.gd 的 _noise_timer）→ 不会让守卫一直记着那一嗓子。
+func _apply_noise_effect(target_id: int) -> void:
+	if guards_root == null:
+		return
+	var prop := _find_prop_by_id(target_id)
+	if prop == null:
+		return
+	var n2d := prop as Node2D
+	if n2d == null:
+		return
+	var pos := n2d.global_position
+	for child in guards_root.get_children():
+		var g := child as Node2D
+		if g == null:
+			continue
+		if g.has_method(&"hear_noise"):
+			g.call(&"hear_noise", pos, NOISE_DURATION)
 
 
 ## 按 prop_id 找道具节点（房主与客户端各找自己的 props_root）。

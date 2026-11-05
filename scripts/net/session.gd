@@ -225,7 +225,22 @@ func host_game(port: int = DEFAULT_PORT) -> Error:
 ##
 ## 客户端的名单**不从本地 peer_list() 算**，等房主广播。
 ## **连接超时兜底只对客户端生效**：连不上时 8 秒后主动放弃并回到大厅态。
+##
+## ★★ **已经有活着的 peer 时直接拒绝加入**（2026-11-05 用户报障：
+##   「创建房间 → 再点加入房间」→ join 把 transport 上的**服务端 peer
+##   换成了客户端 peer** → 房主身份当场丢失，刚建好的房间
+##   （以及已经连进来的人）一起没了）。
+##   → 两种操作顺序统一成「**先成功的那个算数**」：
+##     「加入 → 创建」由 host_game() 停掉连接超时计时器兜（见上）；
+##     「创建 → 加入」由这里的守卫兜。
+##   → 拒绝时**不动 transport、不换 peer** —— 房间必须原样活着。
 func join_game(address: String, port: int = DEFAULT_PORT) -> Error:
+	if _has_live_peer():
+		# ★ 不碰 transport：换 peer 就等于把房主身份交出去（见上面的说明）。
+		_last_failure_reason = ("你已经创建了房间，不用再加入" if is_host()
+			else "已经在房间里了，不用再加入")
+		push_warning("[Session] 已经有一个活着的 peer，拒绝加入房间")
+		return ERR_ALREADY_IN_USE
 	_ensure_transport()
 	# 新的一次尝试 → 上一次失败的原因不再相关（大厅状态栏要跟着更新）。
 	_last_failure_reason = ""
@@ -236,6 +251,26 @@ func join_game(address: String, port: int = DEFAULT_PORT) -> Error:
 		return err
 	_start_connect_timeout()
 	return OK
+
+
+## transport 上是不是已经有一个**活着**的 peer。
+##
+## 两种「活着」都算：
+##   * 房主那个**服务端** peer（create_server 成功后一直是 CONNECTED）；
+##   * 客户端那个**正在连 / 已连上**的 peer（CONNECTING / CONNECTED）。
+## → 两种情况下再点「加入房间」都会把 peer 换掉 → 必须拒绝。
+##
+## ★ 判据是「peer 还在、连接没断」，**不是**「有没有 transport」：
+##   连接失败过的 transport 仍然留着那个**已断开**的 peer
+##   （见 _on_transport_connection_failed 的说明：那个回调里刻意不关 peer）
+##   → 那种情况**允许**重新加入（重试是既有合法路径）。
+func _has_live_peer() -> bool:
+	if _transport == null:
+		return false
+	var p := _transport.get_peer()
+	if p == null:
+		return false
+	return p.get_connection_status() != MultiplayerPeer.CONNECTION_DISCONNECTED
 
 
 ## 把传输挂到 SceneTree 的 MultiplayerAPI 上。
