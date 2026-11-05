@@ -1,7 +1,7 @@
 # AGENTS.md
 
 《镇长不在的时候》(After Hours) —— Godot 4.7 的 2D 多人潜行原型（抓迷藏 + 捣蛋任务卡）。
-逻辑分辨率 640×360，ENet 联机，开发分支 `feature/p1-vertical-slice`。
+逻辑分辨率 640×360，ENet 联机，开发分支 `main`。
 
 ## 强制：所有 Godot 开发一律走 godot-ai 桥接
 
@@ -10,7 +10,7 @@
 例外：headless 测试不是编辑器操作，仍走 `tools/run_tests.ps1`（桥接也不跑测试套件）。
 
 - MCP 配置（已就绪）：`D:\minimax-code\agent-space\.minimax\mcp.json` → `mcpServers.godot-ai`，stdio，`command = C:\Users\75996\.local\bin\godot-ai.exe`，`args = ["attach"]`
-- 编辑器插件：`addons/godot_ai/`（v4.4.1）。插件必须由用户在编辑器 UI 里启用——编辑器自己写 `[editor_plugins]` 与 `_mcp_game_helper` autoload，外部改写 `project.godot` 会被运行中的编辑器覆盖
+- 编辑器插件：`addons/godot_ai/`（v4.4.1，**MIT 许可，已纳入版本控制**）。`project.godot` 里的 `[editor_plugins]` 与 `_mcp_game_helper` autoload 与它**同进同退**（干净检出即可直接用桥接）。★ 插件仍需用户在编辑器 UI 里启用一次；外部改写 `project.godot` 会被运行中的编辑器覆盖
 - 后端由插件拉起并持有（HTTP 8000 / WS 9500，带 `--owner-pid`）。**不要自己另起一个 attach 后端**去抢端口
 - 连通性自检：`mcp__godot-ai__session_manage(op="list")` 返回 `count=0` = 编辑器没接上，先让用户开编辑器并确认插件已启用
 
@@ -60,7 +60,7 @@ powershell -ExecutionPolicy Bypass -NoProfile -File tools\run_tests.ps1
 - `tools/` — headless 测试与辅助脚本（`test_*.gd` + `run_tests.ps1`）
 - `docs/gameplay-guide.md` — 玩家向玩法说明（含"当前版本的已知限制"清单）
 - `assets/` `data/` — 美术与数据
-- `addons/godot_ai/` — godot-ai 编辑器插件（当前未纳入版本控制）
+- `addons/godot_ai/` — godot-ai 编辑器插件（MIT，**已纳入版本控制**，与 `project.godot` 同进同退）
 - `.superpowers/sdd/2026-11-03-after-hours-p1-vertical-slice/` — 设计与实施文档，**被 `.superpowers/sdd/.gitignore` 忽略、不进 git**；本机完整约束见其中 `global-constraints.md`
 
 ## 硬性约束
