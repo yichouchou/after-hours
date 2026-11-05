@@ -143,7 +143,9 @@ func _check_anchor(path: String) -> int:
 		return _check(false, "锚点：%s 有不透明像素" % path)
 	var w := img.get_width()
 	var h := img.get_height()
-	var bottom_ok := int(bbox[3]) == h - 1
+	# bbox 是排他下界：[minx, miny, maxx+1, maxy+1]
+	# → bbox[3] == h 表示最下方的不透明像素就在画布最后一行
+	var bottom_ok := int(bbox[3]) == h
 	var center_ok := absf((float(bbox[0]) + float(bbox[2])) * 0.5 - float(w) * 0.5) <= 2.0
 	return _check(bottom_ok and center_ok,
 		"锚点：%s 底边贴地+中心居中（bbox %s，画布 %dx%d）" % [path, str(bbox), w, h])

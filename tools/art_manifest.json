@@ -1,0 +1,12 @@
+{
+  "style_prefix": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects",
+  "items": [
+    {"out": "assets/chars/char_0.png", "kind": "char", "world_size": [64, 64], "prompt": "a chibi villager in a red hooded jacket, full body standing, facing right", "style_ref": null, "anchor": "feet"},
+    {"out": "assets/chars/char_1.png", "kind": "char", "world_size": [64, 64], "prompt": "a chibi villager in a blue coat, full body standing, facing right", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
+    {"out": "assets/chars/char_2.png", "kind": "char", "world_size": [64, 64], "prompt": "a chibi villager in a green sweater, full body standing, facing right", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
+    {"out": "assets/chars/char_3.png", "kind": "char", "world_size": [64, 64], "prompt": "a chibi villager in a yellow raincoat, full body standing, facing right", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
+    {"out": "assets/chars/char_4.png", "kind": "char", "world_size": [64, 64], "prompt": "a chibi villager in a purple dress, full body standing, facing right", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
+    {"out": "assets/chars/char_5.png", "kind": "char", "world_size": [64, 64], "prompt": "a chibi villager in a brown apron, full body standing, facing right", "style_ref": "assets/chars/char_0.png", "anchor": "feet"},
+    {"out": "assets/chars/char_guard.png", "kind": "char", "world_size": [64, 64], "prompt": "a chibi night watchman guard in a dark blue uniform with a peaked cap, holding a lantern, full body standing, facing right", "style_ref": "assets/chars/char_0.png", "anchor": "feet"}
+  ]
+}

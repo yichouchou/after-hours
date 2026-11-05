@@ -1,0 +1,51 @@
+{
+  "assets/chars/char_0.png": {
+    "bg_node_id": "459968119186561",
+    "node_id": "459967590044326",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a chibi villager in a red hooded jacket, full body standing, facing right",
+    "style_ref": null,
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/chars/char_1.png": {
+    "bg_node_id": "459967771350097",
+    "node_id": "459967496709282",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a chibi villager in a blue coat, full body standing, facing right",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/chars/char_2.png": {
+    "bg_node_id": "459967649825653",
+    "node_id": "459967968822554",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a chibi villager in a green sweater, full body standing, facing right",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/chars/char_3.png": {
+    "bg_node_id": "459967590044347",
+    "node_id": "459968000668511",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a chibi villager in a yellow raincoat, full body standing, facing right",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/chars/char_4.png": {
+    "bg_node_id": "459967771350112",
+    "node_id": "459967743181738",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a chibi villager in a purple dress, full body standing, facing right",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/chars/char_5.png": {
+    "bg_node_id": "459968604333127",
+    "node_id": "459968216527790",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a chibi villager in a brown apron, full body standing, facing right",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/chars/char_guard.png": {
+    "bg_node_id": "459967967474346",
+    "node_id": "459968499442897",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a chibi night watchman guard in a dark blue uniform with a peaked cap, holding a lantern, full body standing, facing right",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  }
+}
