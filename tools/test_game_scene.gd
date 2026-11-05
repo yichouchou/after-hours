@@ -317,12 +317,31 @@ func _boot() -> void:
 			% card_panel.size.x)
 		# 标题必须**换行**才读得完（不许被裁掉、不许画到画面中央）
 		var max_lines := 0
+		var too_flat: Array = []
+		var bad_font: Array = []
 		for child in card_panel.get_children():
 			var lbl := child as Label
 			if lbl != null:
 				max_lines = maxi(max_lines, lbl.get_line_count())
+				# ★ 每一行都真的有**画字的高度**。
+				#   Godot 4 的 Label.get_minimum_size() 在开了 autowrap 时会返回
+				#   Size2(1, clip_text ? 1 : 文字高度) —— 一旦同时开了 clip_text，
+				#   最小高度被压成 1 px → VBoxContainer 只给 1 px 高 → **字画不出来**。
+				#   （面板宽度与 get_line_count() 都还是对的，只有实机截图才看得出来）
+				var fs: int = lbl.get_theme_font_size("font_size")
+				if lbl.size.y < float(fs):
+					too_flat.append("「%s」只有 %.0f px 高（至少要 %.0f px）"
+						% [lbl.text, lbl.size.y, float(fs)])
+				# ★ 字号必须**真的落在 Label 上**（theme_override 不往子节点传，
+				#   设在 CardList 上等于没设 —— 实测踩过）。
+				if fs != 13:
+					bad_font.append("「%s」字号 %d（应为 13）" % [lbl.text, fs])
 		_fails += _check(max_lines >= 2,
 			"[§4-22] 最长的标题换行显示（读得完），实际行数 %d" % max_lines)
+		_fails += _check(too_flat.is_empty(),
+			"[§4-22] 每一行清单都真的有画字的高度%s" % _first(too_flat))
+		_fails += _check(bad_font.is_empty(),
+			"[§4-22] 清单字号是 13（theme_override 必须设在 Label 上）%s" % _first(bad_font))
 		game.call(&"_refresh_hud")
 
 	# ==================================================================
@@ -352,6 +371,54 @@ func _boot() -> void:
 		_fails += _check(Vector2(ctx_after.get("noise_pos", Vector2.ZERO)) == pot_node.global_position,
 			"[§4-23] 噪音位置 == 花盆的位置（实际 %s，期望 %s）"
 			% [str(ctx_after.get("noise_pos", Vector2.ZERO)), str(pot_node.global_position)])
+
+		# ==================================================================
+		# [§4-23-B] ★ 老陈听见之后**真的朝声音走过去**
+		#
+		# [§4-23] 只证明噪音送到了守卫的 ctx；
+		# 这一条钉住**下一步**：起疑 + 朝声音的方向走
+		#（不然守卫只是"心里起疑"却站在原地，敲锅等于白敲）。
+		#
+		# ★ 为什么把守卫放回岗位、把巡逻半径清零：
+		#   巡逻本身也会让守卫移动 → 净位移分不清是"巡逻"还是"朝声音走"。
+		#   patrol_radius = 0 → 巡逻目标 = 岗位 = 站着不动 → 位移只可能来自噪音。
+		# ★ 用**离守卫最近的那口锅**（地图上两口锅，只有一口在听觉半径内）。
+		# ==================================================================
+		var near_pot: Node2D = null
+		var near_dist := 1e9
+		for child in prop_nodes:
+			if StringName(str(child.get("prop_tag"))) != &"pot":
+				continue
+			var dd: float = guard.global_position.distance_to(child.global_position)
+			if dd < near_dist:
+				near_dist = dd
+				near_pot = child as Node2D
+		if near_pot != null:
+			_fails += _check(near_dist <= float(guard.hearing_range),
+				"[§4-23-B] 有一口锅在老陈的听觉半径内（%.0f ≤ %.0f px）"
+				% [near_dist, float(guard.hearing_range)])
+			# 回到岗位 + 巡逻半径清零（见上面的说明）
+			guard.global_position = GUARD_HOME
+			guard.set("patrol_radius", 0.0)
+			var d_before: float = guard.global_position.distance_to(near_pot.global_position)
+			var state_before: int = int(guard.brain.state)
+			rpc_node.call(&"_apply_world_effect", &"noise_pot", int(near_pot.get("prop_id")))
+			for i in 20:
+				guard.call(&"_physics_process", 0.05)
+			var d_after: float = guard.global_position.distance_to(near_pot.global_position)
+			_fails += _check(int(guard.brain.state) == 1,
+				"[§4-23-B] 老陈听见动静后**起疑**（PATROL/SUSPICIOUS，实际 %d）"
+				% int(guard.brain.state))
+			_fails += _check(d_after < d_before,
+				"[§4-23-B] 老陈**朝声音的方向**走过来了（距离 %.1f → %.1f px，起疑前状态 %d）"
+				% [d_before, d_after, state_before])
+			# ★ 把守卫**还原**回原状：后面的断言（§4-15 等）要求它在岗位 (480, 288)，
+			#   巡逻半径也要回默认值 —— 这一段只是"量一下"，量完必须还原。
+			guard.set("patrol_radius", 120.0)
+			guard.global_position = GUARD_HOME
+			guard.brain.state = GuardBrain.State.PATROL
+			guard.brain.suspicion = 0.0
+			guard.call(&"hear_noise", Vector2.ZERO, 0.0)
 
 	# ==================================================================
 	# [§4-21] ★ 守卫编号**不是写死的默认值**（修复轮 1 Important 2：断言强度）

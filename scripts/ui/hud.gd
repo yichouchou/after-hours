@@ -42,9 +42,17 @@ func _on_finish_pressed() -> void:
 	finish_pressed.emit()
 
 
+## 清单每一行的字号。
+##
+## ★ 字号**直接设在这几个 Label 上**（add_theme_font_size_override）——
+##   不是设在 hud.tscn 的 CardList 上：**theme_override 不往下传给子节点**
+##   （Container 的 theme_override 只影响它自己），设在容器上等于没设。
+const CARD_FONT_SIZE := 13
+
+
 ## 设置清单（每行一条）。空数组 = 清空。
 ##
-## ★ 每行**换行显示**（autowrap）+ **裁掉溢出**（clip_text）：
+## ★ 每行**换行显示**（autowrap）：
 ##   清单面板只有 150 px 宽（视口 640 → ≈23%），而最长的标题
 ##   「把长椅搬到池塘边看日落」有 11 个字 —— 不换行的话这一行要 191 px，
 ##   而 **VBoxContainer 的 size 会被子节点的最小宽度顶开**
@@ -53,8 +61,14 @@ func _on_finish_pressed() -> void:
 ##   （玩家永远在正中，那正是最不该被字挡住的地方）。
 ##   → 换行之后标签的最小宽度回到 1 px，面板才真的保持 150 px。
 ##   （实测数据见 .superpowers/sdd/.../_tmp_task14/probe_hud_cardlist.gd）
-##   字号在 hud.tscn 里用 theme_override_font_sizes/font_size = 13 定死
-##   （对这个 VBoxContainer 生效 → 所有子 Label 都继承它）。
+##
+## ★★ **绝不能同时开 clip_text**（2026-11-05 实测踩到）：
+##   Godot 4 的 Label.get_minimum_size() 在「开了 autowrap」时会返回
+##       Size2(1, clip_text ? 1 : 实际文字高度)
+##   → 一旦 clip_text = true，最小高度被**压成 1 px**
+##   → VBoxContainer 给每个 Label 1 px 高 → **字根本画不出来**
+##   （面板宽度照样是 150，get_line_count() 照样是 2 —— 只有实机截图才看得出来）
+##   → 所以只开 autowrap，不开 clip_text。
 func set_card_list(titles: Array[String]) -> void:
 	for c in _card_list.get_children():
 		# 先摘下来再释放：queue_free 要到帧末才生效，
@@ -65,7 +79,7 @@ func set_card_list(titles: Array[String]) -> void:
 		var l := Label.new()
 		l.text = "□ %s" % titles[i]
 		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		l.clip_text = true
+		l.add_theme_font_size_override("font_size", CARD_FONT_SIZE)
 		_card_list.add_child(l)
 
 
