@@ -47,5 +47,75 @@
     "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a chibi night watchman guard in a dark blue uniform with a peaked cap, holding a lantern, full body standing, facing right",
     "style_ref": "assets/chars/char_0.png",
     "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_barrel.png": {
+    "bg_node_id": "459969860682394",
+    "node_id": "459969307763942",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single wooden barrel, three-quarter view, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_basket.png": {
+    "bg_node_id": "459969637720713",
+    "node_id": "459968325341874",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single woven wicker basket, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_bench.png": {
+    "bg_node_id": "459969669657318",
+    "node_id": "459969816691925",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single long wooden park bench seen from the side, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_carrot.png": {
+    "bg_node_id": "459969550901952",
+    "node_id": "459969442145477",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single orange carrot with green leaves lying on the ground, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_chair.png": {
+    "bg_node_id": "459968762643321",
+    "node_id": "459969028412595",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single wooden chair seen from a three-quarter view, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_dog.png": {
+    "bg_node_id": "459970430174029",
+    "node_id": "459969953559267",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single small brown dog sitting, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_hat.png": {
+    "bg_node_id": "459968325341869",
+    "node_id": "459968943678626",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single brown fedora hat, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_lamp.png": {
+    "bg_node_id": "459969393582890",
+    "node_id": "459969839882896",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single tall vintage street lamp post with a round lantern glowing on top, full lamp post visible, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_pot.png": {
+    "bg_node_id": "459969669657325",
+    "node_id": "459970419557120",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single terracotta flower pot with a small green plant, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
+  },
+  "assets/props/prop_sign.png": {
+    "bg_node_id": "459969816691941",
+    "node_id": "459969669657330",
+    "prompt": "hand-drawn children's picture book style game sprite, warm gouache texture, clean dark outline, flat muted colors, soft lighting, single object centered, plain white background, no shadow, no text, no extra objects, a single wooden notice board sign on a post, close up",
+    "style_ref": "assets/chars/char_0.png",
+    "tool": "mcode-tools connector__matrix__generate_image + remove_image_background"
   }
 }
